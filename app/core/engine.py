@@ -62,6 +62,7 @@ class Engine:
         self.push: PushServer | None = None
         self.rdp_enabled = True
         self.scan_enabled = True
+        self.sort_mode = "status"  # status | name | ip
         self.load_settings()
 
     def _auto_connect(self, node: Node):
@@ -234,6 +235,10 @@ class Engine:
             self.tunnel.enabled = bool(on)
         self.save_settings()
 
+    def set_sort_mode(self, mode: str):
+        self.sort_mode = mode
+        self.save_settings()
+
     # --- push на телефон (ntfy) ---
 
     def set_push(self, enabled: bool, port: int = 8087, topic: str = "lanalerts"):
@@ -289,6 +294,7 @@ class Engine:
             "theme": self.theme,
             "rdp_enabled": self.rdp_enabled,
             "scan_enabled": self.scan_enabled,
+            "sort_mode": self.sort_mode,
             "push": {
                 "enabled": self._push_enabled,
                 "port": self._push_port,
@@ -313,6 +319,7 @@ class Engine:
         self.theme = str(data.get("theme", "light"))
         self.set_feature("rdp_enabled", bool(data.get("rdp_enabled", True)))
         self.scan_enabled = bool(data.get("scan_enabled", True))
+        self.sort_mode = str(data.get("sort_mode", "status"))
         push = data.get("push") or {}
         if push.get("enabled"):
             self.set_push(True, int(push.get("port", 8087)),

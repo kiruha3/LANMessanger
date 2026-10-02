@@ -85,6 +85,11 @@ class MainWindow(QMainWindow):
         self.node_list = QListWidget()
         self.node_list.itemClicked.connect(self._select)
 
+        self.sort_btn = QPushButton()
+        self.sort_btn.setToolTip("Порядок списка: клик — следующий режим")
+        self.sort_btn.clicked.connect(self._cycle_sort)
+        self._update_sort_btn()
+
         self.scan_btn = QPushButton("Обновить скан сети")
         self.scan_btn.clicked.connect(lambda: self.start_scan(force=True))
         self.scan_btn.setVisible(engine.scan_enabled)
@@ -96,6 +101,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.name_edit)
         left_layout.addLayout(addip_row)
         left_layout.addLayout(rejected_row)
+        left_layout.addWidget(self.sort_btn)
         left_layout.addWidget(self.node_list, 1)
         left_layout.addWidget(self.scan_btn)
         left_layout.addWidget(self.settings_btn)
@@ -266,11 +272,38 @@ class MainWindow(QMainWindow):
         }
         self.refresh()
 
+    # --- сортировка списка ---
+
+    SORT_MODES = ["status", "name", "ip"]
+    SORT_LABELS = {"status": "⇅ Сорт: в сети сверху",
+                   "name": "⇅ Сорт: по имени",
+                   "ip": "⇅ Сорт: по IP"}
+
+    def _cycle_sort(self):
+        modes = self.SORT_MODES
+        nxt = modes[(modes.index(self.engine.sort_mode) + 1) % len(modes)]
+        self.engine.set_sort_mode(nxt)
+        self._update_sort_btn()
+        self._sig = None  # принудительная перерисовка
+        self.refresh()
+
+    def _update_sort_btn(self):
+        self.sort_btn.setText(self.SORT_LABELS.get(
+            self.engine.sort_mode, self.SORT_LABELS["status"]))
+
+    def _sorted_nodes(self, nodes):
+        mode = self.engine.sort_mode
+        if mode == "name":
+            return sorted(nodes, key=lambda n: (n.name.lower(), n.ip))
+        if mode == "ip":
+            return sorted(nodes, key=lambda n: tuple(int(p) for p in n.ip.split(".")))
+        return nodes  # status: registry уже сортирует онлайн первыми
+
     # --- список узлов и устройств ---
 
     def refresh(self):
         self._refresh_rejected()
-        nodes = self.engine.nodes()
+        nodes = self._sorted_nodes(self.engine.nodes())
         node_ips = {n.ip for n in nodes}
         scanned = {ip: hn for ip, hn in self._scanned.items() if ip not in node_ips}
         signature = (

@@ -1,6 +1,9 @@
 """Светлая/тёмная тема: QSS на всё приложение + цвета пузырей чата."""
 
+import os
+
 _current = "light"
+_check_url_cache: str | None = None
 
 ACCENT = "#3390ec"
 
@@ -28,7 +31,7 @@ QCheckBox::indicator {
     border: 1px solid #a0a0a0; border-radius: 3px; background: #ffffff;
 }
 QCheckBox::indicator:hover { border-color: #3390ec; }
-QCheckBox::indicator:checked { background: #3390ec; border-color: #3390ec; }
+QCheckBox::indicator:checked { background: #3390ec; border-color: #3390ec; image: url(__CHECK__); }
 QMenu { background: #ffffff; color: #1f1f1f; border: 1px solid #d0d0d0; }
 QMenu::item:selected { background: #3390ec; color: #ffffff; }
 QToolTip { background: #ffffff; color: #1f1f1f; border: 1px solid #c8c8c8; }
@@ -67,7 +70,7 @@ QCheckBox::indicator {
     border: 1px solid #666666; border-radius: 3px; background: #1f1f1f;
 }
 QCheckBox::indicator:hover { border-color: #3390ec; }
-QCheckBox::indicator:checked { background: #3390ec; border-color: #3390ec; }
+QCheckBox::indicator:checked { background: #3390ec; border-color: #3390ec; image: url(__CHECK__); }
 QMenu { background: #2b2b2b; color: #e6e6e6; border: 1px solid #555555; }
 QMenu::item:selected { background: #3390ec; color: #ffffff; }
 QToolTip { background: #1f1f1f; color: #e6e6e6; border: 1px solid #555555; }
@@ -99,10 +102,36 @@ def current() -> str:
     return _current
 
 
+def _check_url() -> str:
+    """Белая галочка для чекбоксов (QSS умеет image только из файла)."""
+    global _check_url_cache
+    if _check_url_cache:
+        return _check_url_cache
+    from PyQt6.QtGui import QColor, QImage, QPainter, QPen
+
+    from ..core.history import base_dir
+
+    img = QImage(13, 13, QImage.Format.Format_ARGB32)
+    img.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(img)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#ffffff"))
+    pen.setWidth(2)
+    painter.setPen(pen)
+    painter.drawLine(3, 7, 6, 10)
+    painter.drawLine(6, 10, 11, 3)
+    painter.end()
+    path = os.path.join(base_dir(), "check.png")
+    img.save(path)
+    _check_url_cache = "file:///" + path.replace("\\", "/")
+    return _check_url_cache
+
+
 def apply(app, theme_name: str):
     global _current
     _current = "dark" if theme_name == "dark" else "light"
-    app.setStyleSheet(DARK_QSS if _current == "dark" else LIGHT_QSS)
+    qss = DARK_QSS if _current == "dark" else LIGHT_QSS
+    app.setStyleSheet(qss.replace("__CHECK__", _check_url()))
 
 
 def bubbles() -> dict:
