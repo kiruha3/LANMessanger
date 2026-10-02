@@ -42,6 +42,7 @@ class TunnelManager:
         self.cm = connections
         connections.on_stream = self._on_stream
         self.enabled = True  # выкл = не принимать туннели к нам (RDP отключён)
+        self.on_error = None  # callback(key, текст) — показать пользователю
         self.tunnels: dict[str, dict] = {}      # key узла -> состояние
         self.streams: dict[str, Stream] = {}    # stream_id -> Stream
         self._lock = threading.Lock()
@@ -112,32 +113,49 @@ class TunnelManager:
             return
         pc = self.cm.get_or_dial(key, state["ip"], state["node_port"])
         if not pc:
+            self._emit_error(key, "нет соединения с узлом")
             sock.close()
             return
         sid = protocol.new_id()
         ev = threading.Event()
         res: dict = {}
         with self._lock:
-            self._open_events[sid] = (ev, res)
+            self._open_events[sid] = (ev, res, key)
         try:
             pc.send_packet("stream_open", id=sid, target_port=state["remote_port"])
         except OSError:
             sock.close()
             with self._lock:
                 self._open_events.pop(sid, None)
+            self._emit_error(key, "соединение оборвалось при открытии туннеля")
             return
-        if not ev.wait(OPEN_TIMEOUT) or not res.get("ok"):
+        if not ev.wait(OPEN_TIMEOUT):
             sock.close()
             with self._lock:
                 self._open_events.pop(sid, None)
+            self._emit_error(
+                key, "узел не ответил на туннель — похоже, там старая "
+                     "версия приложения (обновите exe на обоих ПК)")
             return
         with self._lock:
             self._open_events.pop(sid, None)
+        if not res.get("ok"):
+            sock.close()
+            err = str(res.get("error", "отказ"))
+            if "unreachable" in err:
+                err = ("на удалённом компьютере не отвечает порт 3389 — "
+                       "включён ли там «Удалённый рабочий стол»?")
+            self._emit_error(key, err)
+            return
         stream = Stream(sid, sock, pc)
         with self._lock:
             self.streams[sid] = stream
             state["streams"].add(sid)
         self._pump_out(stream)
+
+    def _emit_error(self, key: str, text: str):
+        if self.on_error:
+            self.on_error(key, text)
 
     # --- общий насос: локальный сокет -> канал ---
 

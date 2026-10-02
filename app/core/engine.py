@@ -55,6 +55,8 @@ class Engine:
             on_message=self._on_message,
         )
         self.tunnel = TunnelManager(self.connections)
+        self.on_tunnel_error = None  # callback(key, текст) для UI
+        self.tunnel.on_error = self._tunnel_error_relay
         self._dial_attempts: dict[str, float] = {}
         self.discovery.on_node_new = self._auto_connect
         self.discovery.on_node_update = self._auto_connect
@@ -64,6 +66,10 @@ class Engine:
         self.scan_enabled = True
         self.sort_mode = "status"  # status | name | ip
         self.load_settings()
+
+    def _tunnel_error_relay(self, key: str, text: str):
+        if self.on_tunnel_error:
+            self.on_tunnel_error(key, text)
 
     def _auto_connect(self, node: Node):
         """Канал к узлу поднимается сам, как только он обнаружен:

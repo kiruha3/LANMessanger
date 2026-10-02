@@ -42,6 +42,7 @@ class MainWindow(QMainWindow):
     message_received = pyqtSignal(str)   # key чата (мост из сетевых потоков)
     host_found = pyqtSignal(str, str)    # ip, hostname (живые строки скана)
     scan_done = pyqtSignal()
+    tunnel_error = pyqtSignal(str, str)  # key, текст ошибки туннеля
 
     def __init__(self, engine):
         super().__init__()
@@ -123,6 +124,8 @@ class MainWindow(QMainWindow):
         self.message_received.connect(self._on_new_message)
         self.host_found.connect(self._on_host_found)
         self.scan_done.connect(self._on_scan_done)
+        self.engine.on_tunnel_error = lambda key, err: self.tunnel_error.emit(key, err)
+        self.tunnel_error.connect(self._show_tunnel_error)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
@@ -186,6 +189,11 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self, self.engine)
         if dlg.exec():
             self.scan_btn.setVisible(self.engine.scan_enabled)
+
+    def _show_tunnel_error(self, key: str, text: str):
+        node = self.engine.node_by_key(key)
+        name = node.name if node else key
+        QMessageBox.warning(self, "RDP-туннель", f"{name}:\n{text}")
 
     def _allow_rejected(self):
         ips = self.engine.rejected_ips()
