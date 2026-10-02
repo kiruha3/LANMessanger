@@ -74,6 +74,8 @@ def parse_args():
     parser.add_argument("--peer", action="append", default=[],
                         help="direct peer addr:port (если broadcast недоступен)")
     parser.add_argument("--console", action="store_true", help="консольный режим без GUI")
+    parser.add_argument("--multi", action="store_true",
+                        help="разрешить второй экземпляр (для тестов)")
     return parser.parse_args()
 
 
@@ -129,7 +131,7 @@ def run_gui(engine):
 
 def main():
     args = parse_args()
-    if not args.console and not ensure_single_instance():
+    if not args.console and not args.multi and not ensure_single_instance():
         return
     name = args.name or Engine.load_saved_name() or getpass.getuser()
     engine = Engine(name, udp_port=args.udp_port, tcp_port=args.tcp_port,
