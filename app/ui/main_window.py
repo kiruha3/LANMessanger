@@ -168,7 +168,7 @@ class MainWindow(QMainWindow):
             return
         node = self.engine.node_by_key(key)
         name = node.name if node else key
-        msgs = self.engine.chats.get(key, [])
+        msgs = self.engine.chat(key)
         text = msgs[-1].text[:200] if msgs else ""
         QApplication.beep()
         if self.tray.isVisible():

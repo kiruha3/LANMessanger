@@ -94,7 +94,7 @@ class ChatPanel(QWidget):
         status = "в сети" if (node and node.online) else "не в сети"
         self.header.setText(f"{name}  —  {status}")
 
-        msgs = self.engine.chats.get(self.key, [])
+        msgs = self.engine.chat(self.key)
         signature = (len(msgs), tuple(m.status for m in msgs))
         if force or signature != self._rendered:
             self._rendered = signature

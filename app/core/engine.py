@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 from dataclasses import dataclass
 
@@ -6,8 +7,9 @@ from ..net import protocol
 from ..net.connections import ConnectionManager
 from ..net.constants import TCP_PORT, UDP_PORT, is_private_ip
 from ..net.discovery import DiscoveryService, Node
+from .history import History, base_dir
 
-SETTINGS_FILE = "settings.json"
+SETTINGS_FILE = os.path.join(base_dir(), "settings.json")
 DEFAULT_UDP_PORT = UDP_PORT
 DEFAULT_TCP_PORT = TCP_PORT
 
@@ -34,6 +36,10 @@ class Engine:
         self.unread: dict[str, int] = {}
         self._lock = threading.Lock()
         self.on_message_event = None  # callback(key, ChatMessage) для UI
+        try:
+            self.history = History()
+        except Exception:
+            self.history = None  # БД недоступна — работаем в памяти
 
         self.discovery = DiscoveryService(
             name, udp_port=udp_port, tcp_port=tcp_port, targets=targets,
@@ -44,6 +50,19 @@ class Engine:
         )
         self.load_settings()
 
+    def chat(self, key: str) -> list[ChatMessage]:
+        """История чата: из памяти, при первом обращении — подгрузка из БД."""
+        with self._lock:
+            if key in self.chats:
+                return self.chats[key]
+        msgs = []
+        if self.history:
+            msgs = [ChatMessage(id=r[0], direction=r[1], author=r[2],
+                                text=r[3], timestamp=r[4], status=r[5])
+                    for r in self.history.load(key)]
+        with self._lock:
+            return self.chats.setdefault(key, msgs)
+
     def start(self):
         self.connections.start()
         self.discovery.start()
@@ -52,6 +71,8 @@ class Engine:
         self.discovery.stop()
         self.connections.stop()
         self.save_settings()
+        if self.history:
+            self.history.close()
 
     def set_name(self, name: str):
         self.name = name
@@ -95,12 +116,17 @@ class Engine:
         )
         with self._lock:
             self.chats.setdefault(key, []).append(msg)
+        if self.history:
+            self.history.add(key, msg)
         return msg
 
     def deliver(self, key: str, msg: ChatMessage, ip: str, port: int):
+        db_id = msg.id
         msg_id, ok = self.connections.send(key, ip, port, msg.text)
         msg.id = msg_id
         msg.status = "delivered" if ok else "failed"
+        if self.history:
+            self.history.update_status(key, db_id, msg.status)
 
     def send(self, key: str, ip: str, port: int, text: str) -> ChatMessage:
         """Синхронная отправка (для консоли/тестов)."""
@@ -121,6 +147,8 @@ class Engine:
         with self._lock:
             self.chats.setdefault(key, []).append(msg)
             self.unread[key] = self.unread.get(key, 0) + 1
+        if self.history:
+            self.history.add(key, msg)
         if self.on_message_event:
             self.on_message_event(key, msg)
 
