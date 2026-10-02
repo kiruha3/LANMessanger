@@ -25,23 +25,27 @@ MAX_BUBBLE_RATIO = 0.65
 PAD_X, PAD_Y = 12, 8
 
 
-def _doc_for(msg, max_w: int) -> QTextDocument:
+def _layout(msg, avail_w: int):
+    """Единый расчёт: документ, ширина и высота пузыря."""
     direction, author, text, ts, status = msg
     colors = theme.bubbles()
     ts_col = colors["ts"]
     time_str = time.strftime("%H:%M", time.localtime(ts))
     body = html.escape(text).replace("\n", "<br>")
-    if direction == "out":
-        meta = f'<span style="color:{ts_col}; font-size:8pt">{time_str} {STATUS_MARKS.get(status, "")}</span>'
-        content = f"{body}<br><div align='right'>{meta}</div>"
-    else:
-        meta = f'<span style="color:{ts_col}; font-size:8pt">{time_str}</span>'
-        content = (f'<b style="color:{colors["accent"]}">{html.escape(author)}</b><br>'
-                   f"{body}<br><div align='right'>{meta}</div>")
+    mark = f" {STATUS_MARKS.get(status, '')}" if direction == "out" else ""
+    meta = f' <span style="color:{ts_col}; font-size:8pt">{time_str}{mark}</span>'
+    if direction == "in":
+        body = f'<b style="color:{colors["accent"]}">{html.escape(author)}</b><br>' + body
+
+    max_w = max(120, int(avail_w * MAX_BUBBLE_RATIO))
     doc = QTextDocument()
-    doc.setHtml(content)
-    doc.setTextWidth(max_w)
-    return doc
+    doc.setDocumentMargin(0)
+    doc.setHtml(body + meta)
+    doc.setTextWidth(max_w - 2 * PAD_X)
+    content_w = min(max_w, int(doc.idealWidth() + 0.5) + 2 * PAD_X)
+    doc.setTextWidth(content_w - 2 * PAD_X)
+    content_h = int(doc.size().height() + 0.5) + 2 * PAD_Y
+    return doc, content_w, content_h
 
 
 class BubbleDelegate(QStyledItemDelegate):
@@ -52,10 +56,7 @@ class BubbleDelegate(QStyledItemDelegate):
         direction = msg[0]
         colors = theme.bubbles()
         rect = option.rect
-        max_w = max(120, int(rect.width() * MAX_BUBBLE_RATIO))
-        doc = _doc_for(msg, max_w - 2 * PAD_X)
-        content_w = min(max_w, int(doc.idealWidth()) + 2 * PAD_X)
-        content_h = int(doc.size().height()) + 2 * PAD_Y
+        doc, content_w, content_h = _layout(msg, rect.width())
 
         if direction == "out":
             bx = rect.right() - content_w - 8
@@ -67,6 +68,7 @@ class BubbleDelegate(QStyledItemDelegate):
         bubble = QRectF(bx, rect.top() + 2, content_w, content_h)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipRect(bubble.adjusted(-1, -1, 1, 1))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(bg))
         painter.drawRoundedRect(bubble, 10, 10)
@@ -77,9 +79,8 @@ class BubbleDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index) -> QSize:
         msg = index.data(Qt.ItemDataRole.UserRole)
         w = option.rect.width() or 400
-        max_w = max(120, int(w * MAX_BUBBLE_RATIO))
-        doc = _doc_for(msg, max_w - 2 * PAD_X)
-        return QSize(w, int(doc.size().height()) + 2 * PAD_Y + 6)
+        _, _, content_h = _layout(msg, w)
+        return QSize(w, content_h + 6)
 
 
 class ChatPanel(QWidget):

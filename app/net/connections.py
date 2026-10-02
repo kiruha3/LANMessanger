@@ -94,11 +94,15 @@ class ConnectionManager:
         return bool(pc and pc.alive)
 
     def _keepalive_loop(self):
-        """Ping каждые 25 сек, чтобы NAT не рвал простаивающий канал."""
+        """Ping каждые 25 сек по внешним IP, чтобы NAT не рвал простаивающий
+        канал. Локальные соединения не трогаем — там и без пингов работает."""
         while not self._stop.wait(25):
             with self._lock:
                 conns = list(self.conns.values())
             for pc in conns:
+                ip = pc.key.rsplit(":", 1)[0]
+                if is_private_ip(ip):
+                    continue
                 try:
                     pc.send_packet("ping")
                 except OSError:
