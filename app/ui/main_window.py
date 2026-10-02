@@ -5,7 +5,6 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -21,7 +20,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import autostart
 from ..net import scanner
 from ..net.constants import is_private_ip
 from . import theme
@@ -62,18 +60,6 @@ class MainWindow(QMainWindow):
         self.name_edit.setPlaceholderText("Моё имя в сети")
         self.name_edit.editingFinished.connect(self._name_changed)
 
-        self.autostart_box = QCheckBox("Запускать с Windows")
-        self.autostart_box.setChecked(autostart.is_enabled())
-        self.autostart_box.toggled.connect(self._autostart_toggled)
-
-        self.acceptall_box = QCheckBox("Принимать из любых сетей (VPN/белый IP)")
-        self.acceptall_box.setChecked(engine.accept_all())
-        self.acceptall_box.toggled.connect(engine.set_accept_all)
-
-        self.theme_box = QCheckBox("Тёмная тема")
-        self.theme_box.setChecked(engine.theme == "dark")
-        self.theme_box.toggled.connect(self._theme_toggled)
-
         self.rejected_label = QLabel("")
         self.rejected_label.setStyleSheet("color:#c0392b")
         self.rejected_label.hide()
@@ -100,17 +86,18 @@ class MainWindow(QMainWindow):
 
         self.scan_btn = QPushButton("Обновить скан сети")
         self.scan_btn.clicked.connect(lambda: self.start_scan(force=True))
+        self.scan_btn.setVisible(engine.scan_enabled)
+        self.settings_btn = QPushButton("Настройки…")
+        self.settings_btn.clicked.connect(self._open_settings)
 
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("Моё имя:"))
         left_layout.addWidget(self.name_edit)
-        left_layout.addWidget(self.autostart_box)
-        left_layout.addWidget(self.acceptall_box)
-        left_layout.addWidget(self.theme_box)
         left_layout.addLayout(addip_row)
         left_layout.addLayout(rejected_row)
         left_layout.addWidget(self.node_list, 1)
         left_layout.addWidget(self.scan_btn)
+        left_layout.addWidget(self.settings_btn)
         left = QWidget()
         left.setLayout(left_layout)
 
@@ -186,17 +173,12 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"LAN Messenger — {name}")
             self.tray.setToolTip(f"LAN Messenger — {name}")
 
-    def _autostart_toggled(self, on: bool):
-        ok = autostart.enable() if on else autostart.disable()
-        if not ok:
-            self.autostart_box.blockSignals(True)
-            self.autostart_box.setChecked(not on)
-            self.autostart_box.blockSignals(False)
+    def _open_settings(self):
+        from .settings_dialog import SettingsDialog
 
-    def _theme_toggled(self, on: bool):
-        name = "dark" if on else "light"
-        theme.apply(QApplication.instance(), name)
-        self.engine.set_theme(name)
+        dlg = SettingsDialog(self, self.engine)
+        if dlg.exec():
+            self.scan_btn.setVisible(self.engine.scan_enabled)
 
     def _allow_rejected(self):
         ips = self.engine.rejected_ips()

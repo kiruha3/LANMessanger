@@ -41,6 +41,7 @@ class TunnelManager:
     def __init__(self, connections: ConnectionManager):
         self.cm = connections
         connections.on_stream = self._on_stream
+        self.enabled = True  # выкл = не принимать туннели к нам (RDP отключён)
         self.tunnels: dict[str, dict] = {}      # key узла -> состояние
         self.streams: dict[str, Stream] = {}    # stream_id -> Stream
         self._lock = threading.Lock()
@@ -193,6 +194,10 @@ class TunnelManager:
     def _respond_stream(self, pkt: dict, pc: PeerConn):
         """Мы — принимающая сторона: подключаемся к своему localhost:target."""
         sid = pkt.get("id", "")
+        if not self.enabled:
+            pc.send_packet("stream_open_ack", id=sid, ok=False,
+                           error="RDP отключён на удалённом компьютере")
+            return
         target = int(pkt.get("target_port", 0))
         if target not in ALLOWED_REMOTE_PORTS:
             pc.send_packet("stream_open_ack", id=sid, ok=False,

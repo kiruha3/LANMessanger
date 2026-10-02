@@ -8,6 +8,7 @@ from ..net.connections import ConnectionManager
 from ..net.constants import TCP_PORT, UDP_PORT, is_private_ip
 from ..net.discovery import DiscoveryService, Node
 from .history import History, base_dir
+from .push import PushServer
 from .tunnel import TunnelManager
 
 SETTINGS_FILE = os.path.join(base_dir(), "settings.json")
@@ -37,6 +38,10 @@ class Engine:
         self.unread: dict[str, int] = {}
         self._lock = threading.Lock()
         self.on_message_event = None  # callback(key, ChatMessage) для UI
+        self._push_enabled = False
+        self._push_port = 8087
+        self._push_topic = "lanalerts"
+        self._wd_stop = threading.Event()
         try:
             self.history = History()
         except Exception:
@@ -54,6 +59,9 @@ class Engine:
         self.discovery.on_node_new = self._auto_connect
         self.discovery.on_node_update = self._auto_connect
         self.theme = "light"
+        self.push: PushServer | None = None
+        self.rdp_enabled = True
+        self.scan_enabled = True
         self.load_settings()
 
     def _auto_connect(self, node: Node):
@@ -85,13 +93,15 @@ class Engine:
     def start(self):
         self.connections.start()
         self.discovery.start()
-        self._wd_stop = threading.Event()
+        self._wd_stop.clear()
         threading.Thread(target=self._channel_watchdog, daemon=True).start()
 
     def stop(self):
         self._wd_stop.set()
         self.discovery.stop()
         self.connections.stop()
+        if self.push:
+            self.push.stop()
         self.save_settings()
         if self.history:
             self.history.close()
@@ -193,6 +203,8 @@ class Engine:
             self.unread[key] = self.unread.get(key, 0) + 1
         if self.history:
             self.history.add(key, msg)
+        if self.push:
+            self.push.broadcast(msg.author, msg.text)
         if self.on_message_event:
             self.on_message_event(key, msg)
 
@@ -214,6 +226,32 @@ class Engine:
     def set_theme(self, theme_name: str):
         self.theme = theme_name
         self.save_settings()
+
+    def set_feature(self, name: str, on: bool):
+        """Фичефлаг: rdp_enabled / scan_enabled."""
+        setattr(self, name, bool(on))
+        if name == "rdp_enabled":
+            self.tunnel.enabled = bool(on)
+        self.save_settings()
+
+    # --- push на телефон (ntfy) ---
+
+    def set_push(self, enabled: bool, port: int = 8087, topic: str = "lanalerts"):
+        if self.push:
+            self.push.stop()
+            self.push = None
+        self._push_enabled = enabled
+        self._push_port = port
+        self._push_topic = topic
+        if enabled:
+            self.push = PushServer(port=port, topic=topic)
+            if not self.push.start():
+                self.push = None
+                self._push_enabled = False
+        self.save_settings()
+
+    def push_status(self) -> tuple[bool, int, str]:
+        return (bool(self.push), self._push_port, self._push_topic)
 
     def accept_all(self) -> bool:
         return self.connections.accept_all
@@ -249,6 +287,13 @@ class Engine:
             "allowed_ips": sorted(self.connections.allowed_ips),
             "manual_peers": self._manual_peers(),
             "theme": self.theme,
+            "rdp_enabled": self.rdp_enabled,
+            "scan_enabled": self.scan_enabled,
+            "push": {
+                "enabled": self._push_enabled,
+                "port": self._push_port,
+                "topic": self._push_topic,
+            },
         }
         if extra:
             data.update(extra)
@@ -266,6 +311,12 @@ class Engine:
             return
         self.connections.accept_all = bool(data.get("accept_all", False))
         self.theme = str(data.get("theme", "light"))
+        self.set_feature("rdp_enabled", bool(data.get("rdp_enabled", True)))
+        self.scan_enabled = bool(data.get("scan_enabled", True))
+        push = data.get("push") or {}
+        if push.get("enabled"):
+            self.set_push(True, int(push.get("port", 8087)),
+                          str(push.get("topic", "lanalerts")))
         for ip in data.get("allowed_ips", []):
             self.connections.allow_ip(str(ip))
         for ip in data.get("manual_peers", []):

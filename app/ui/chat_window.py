@@ -201,6 +201,7 @@ class ChatPanel(QWidget):
         self.header.setText(f"{name}  —  {status}")
         port = self.engine.tunnel.rdp_port(self.key)
         self.rdp_btn.setText(f"RDP: 127.0.0.1:{port} ✕" if port else "RDP")
+        self.rdp_btn.setVisible(self.engine.rdp_enabled)
 
         msgs = self.engine.chat(self.key)
         signature = (len(msgs), tuple(m.status for m in msgs))
