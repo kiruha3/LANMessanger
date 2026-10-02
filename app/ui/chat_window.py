@@ -40,7 +40,7 @@ def _layout(msg, avail_w: int):
     max_w = max(120, int(avail_w * MAX_BUBBLE_RATIO))
     doc = QTextDocument()
     doc.setDocumentMargin(0)
-    doc.setHtml(body + meta)
+    doc.setHtml(f'<span style="color:{colors["text"]}">{body}</span>{meta}')
     doc.setTextWidth(max_w - 2 * PAD_X)
     content_w = min(max_w, int(doc.idealWidth() + 0.5) + 2 * PAD_X)
     doc.setTextWidth(content_w - 2 * PAD_X)

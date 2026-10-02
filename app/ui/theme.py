@@ -28,9 +28,13 @@ QMenu::item:selected { background: #3390ec; color: #ffffff; }
 QToolTip { background: #ffffff; color: #1f1f1f; border: 1px solid #c8c8c8; }
 QSplitter::handle { background: #e0e0e0; }
 QScrollBar:vertical { background: transparent; width: 10px; }
-QScrollBar::handle:vertical { background: #c8c8c8; border-radius: 5px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #3390ec; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { background: transparent; height: 10px; }
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: #c8c8c8; border-radius: 5px; min-height: 30px; min-width: 30px;
+}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: #3390ec; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """
 
 DARK_QSS = """
@@ -57,14 +61,20 @@ QMenu::item:selected { background: #3390ec; color: #ffffff; }
 QToolTip { background: #1f1f1f; color: #e6e6e6; border: 1px solid #555555; }
 QSplitter::handle { background: #444444; }
 QScrollBar:vertical { background: transparent; width: 10px; }
-QScrollBar::handle:vertical { background: #555555; border-radius: 5px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #3390ec; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { background: transparent; height: 10px; }
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: #555555; border-radius: 5px; min-height: 30px; min-width: 30px;
+}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: #3390ec; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """
 
 BUBBLES = {
-    "light": {"out": "#cde6ff", "in": "#eeeeee", "ts": "#888888", "accent": "#3390ec"},
-    "dark": {"out": "#2b5278", "in": "#3a3a3a", "ts": "#999999", "accent": "#6ab3f0"},
+    "light": {"out": "#cde6ff", "in": "#eeeeee", "ts": "#888888",
+              "accent": "#3390ec", "text": "#1f1f1f"},
+    "dark": {"out": "#2b5278", "in": "#3a3a3a", "ts": "#999999",
+             "accent": "#6ab3f0", "text": "#e6e6e6"},
 }
 
 NODE_COLORS = {
