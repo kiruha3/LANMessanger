@@ -1,6 +1,5 @@
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QGroupBox,
@@ -10,6 +9,7 @@ from PyQt6.QtWidgets import (
 
 from ..core import autostart
 from . import theme
+from .switch import Switch
 
 
 class SettingsDialog(QDialog):
@@ -23,9 +23,9 @@ class SettingsDialog(QDialog):
 
         # --- общие ---
         general = QGroupBox("Общие")
-        self.autostart_box = QCheckBox("Запускать с Windows")
+        self.autostart_box = Switch("Запускать с Windows")
         self.autostart_box.setChecked(autostart.is_enabled())
-        self.theme_box = QCheckBox("Тёмная тема")
+        self.theme_box = Switch("Тёмная тема")
         self.theme_box.setChecked(engine.theme == "dark")
         gl = QVBoxLayout(general)
         gl.addWidget(self.autostart_box)
@@ -33,18 +33,18 @@ class SettingsDialog(QDialog):
 
         # --- сеть ---
         net = QGroupBox("Сеть")
-        self.acceptall_box = QCheckBox("Принимать из любых сетей (VPN/белый IP)")
+        self.acceptall_box = Switch("Принимать из любых сетей (VPN/белый IP)")
         self.acceptall_box.setChecked(engine.accept_all())
         nl = QVBoxLayout(net)
         nl.addWidget(self.acceptall_box)
 
         # --- фичефлаги ---
         feat = QGroupBox("Функции")
-        self.rdp_box = QCheckBox("RDP-туннель (кнопка в чате + приём туннелей)")
+        self.rdp_box = Switch("RDP-туннель (кнопка в чате + приём туннелей)")
         self.rdp_box.setChecked(engine.rdp_enabled)
-        self.scan_box = QCheckBox("Сканер сети (кнопка «Обновить скан сети»)")
+        self.scan_box = Switch("Сканер сети (кнопка «Обновить скан сети»)")
         self.scan_box.setChecked(engine.scan_enabled)
-        self.push_box = QCheckBox("Уведомления на телефон (ntfy, порт 8087)")
+        self.push_box = Switch("Уведомления на телефон (ntfy, порт 8087)")
         self.push_box.setChecked(engine.push_status()[0])
         fl = QVBoxLayout(feat)
         fl.addWidget(self.rdp_box)
