@@ -1,30 +1,69 @@
 import argparse
 import ctypes
 import getpass
+import os
+import subprocess
 import sys
 import time
 
 from app.core.engine import Engine
+from app.core.history import base_dir
 
 _MUTEX_HANDLE = None
+MUTEX_NAME = "LANMessenger_SingleInstance"
+PID_FILE = os.path.join(base_dir(), "messenger.pid")
+
+
+def _write_pid():
+    try:
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+
+
+def _kill_old_instance():
+    """Закрываем старый экземпляр: по pid-файлу, иначе по имени exe."""
+    try:
+        with open(PID_FILE) as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        pid = None
+    if pid and pid != os.getpid():
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                       capture_output=True)
+    # ждём освобождения мьютекса
+    kernel32 = ctypes.windll.kernel32
+    for _ in range(12):
+        time.sleep(0.5)
+        h = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if kernel32.GetLastError() != 183:
+            kernel32.CloseHandle(h)
+            return
+        kernel32.CloseHandle(h)
 
 
 def ensure_single_instance() -> bool:
-    """Не даём запустить второй экземпляр (иначе две копии видят друг друга
-    как «узлы» и делят входящие сообщения)."""
+    """Один экземпляр: при повторном запуске старый закрывается, новый
+    стартует (чтобы с зависшей копией на удалённом ПК не было проблем)."""
     global _MUTEX_HANDLE
     if sys.platform != "win32":
         return True
     kernel32 = ctypes.windll.kernel32
-    _MUTEX_HANDLE = kernel32.CreateMutexW(None, False, "LANMessenger_SingleInstance")
-    return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
-
-
-def already_running_notice():
-    if sys.platform == "win32":
-        ctypes.windll.user32.MessageBoxW(
-            0, "LAN Messenger уже запущен — значок в трее.",
-            "LAN Messenger", 0x40)
+    _MUTEX_HANDLE = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if kernel32.GetLastError() != 183:  # ERROR_ALREADY_EXISTS
+        _write_pid()
+        return True
+    # мьютекс занят, но мы только что открыли хэндл на него — закрыть,
+    # иначе объект мьютекса не умрёт даже после убийства старого процесса
+    kernel32.CloseHandle(_MUTEX_HANDLE)
+    _MUTEX_HANDLE = None
+    _kill_old_instance()
+    _MUTEX_HANDLE = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if kernel32.GetLastError() == 183:
+        return False
+    _write_pid()
+    return True
 
 
 def parse_args():
@@ -91,7 +130,6 @@ def run_gui(engine):
 def main():
     args = parse_args()
     if not args.console and not ensure_single_instance():
-        already_running_notice()
         return
     name = args.name or Engine.load_saved_name() or getpass.getuser()
     engine = Engine(name, udp_port=args.udp_port, tcp_port=args.tcp_port,
