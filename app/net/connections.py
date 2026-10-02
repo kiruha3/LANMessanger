@@ -10,6 +10,7 @@ import collections
 import ipaddress
 import socket
 import threading
+import uuid
 
 from . import protocol
 from .constants import MAX_TCP_PAYLOAD, TCP_PORT, is_private_ip
@@ -24,6 +25,8 @@ class PeerConn:
         self.key = key
         self.lock = threading.Lock()
         self.alive = True
+        self.outbound = False    # мы инициировали это соединение
+        self.peer_node = None    # node_id пира из его hello
 
     def send_frame(self, data: bytes):
         with self.lock:
@@ -56,6 +59,7 @@ class ConnectionManager:
         self._stop = threading.Event()
         self._sock: socket.socket | None = None
         self._accept_thread: threading.Thread | None = None
+        self.node_id = uuid.uuid4().hex
 
     def allow_ip(self, ip: str):
         self.allowed_ips.add(ip)
@@ -150,7 +154,8 @@ class ConnectionManager:
             if first["type"] == "hello":
                 peer_port = int(first.get("msg_port") or TCP_PORT)
                 key = f"{addr[0]}:{peer_port}"
-                self._register(key, conn, decoder, frames[1:])
+                self._register(key, conn, decoder, frames[1:],
+                               outbound=False, peer_node=first.get("node"))
             else:
                 # старый клиент: одно сообщение — один коннект, регистрировать нечего
                 self._handle_msg(first, addr[0], conn)
@@ -182,19 +187,42 @@ class ConnectionManager:
             sock = socket.create_connection((ip, port), timeout=DIAL_TIMEOUT)
             sock.settimeout(None)
             hello = protocol.encode_frame(protocol.make_packet(
-                "hello", name=self.name, msg_port=self.tcp_port))
+                "hello", node=self.node_id, name=self.name, msg_port=self.tcp_port))
             sock.sendall(hello)
         except OSError:
             return None
-        pc = PeerConn(sock, key)
-        self._register(key, sock, protocol.FrameDecoder(), [], pc=pc)
-        return pc
+        return self._register(key, sock, protocol.FrameDecoder(), [],
+                              pc=PeerConn(sock, key), outbound=True)
 
-    def _register(self, key, conn, decoder, buffered, pc=None):
+    def _register(self, key, conn, decoder, buffered, pc=None,
+                  outbound=False, peer_node=None):
+        """Регистрирует соединение. При одновременном дозвоне с двух сторон
+        остаётся одно: сторона с меньшим node_id держит ИСХОДЯЩЕЕ,
+        с большим — ВХОДЯЩЕЕ (правило симметрично на обеих сторонах)."""
         pc = pc or PeerConn(conn, key)
+        pc.outbound = outbound
+        pc.peer_node = peer_node
         with self._lock:
             old = self.conns.get(key)
-            self.conns[key] = pc
+            keep_new = True
+            if old and old.alive:
+                if peer_node and not old.peer_node:
+                    old.peer_node = peer_node  # тот же пир — дознаём его id
+                if old.outbound == outbound:
+                    keep_new = True  # дубликат направления: свежее вместо старого
+                elif old.peer_node:
+                    keep_outbound = self.node_id < old.peer_node
+                    keep_new = (outbound == keep_outbound)
+                else:
+                    keep_new = outbound
+            if keep_new:
+                self.conns[key] = pc
+        if not keep_new:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return old
         if old and old is not pc:
             old.close()
         threading.Thread(target=self._reader, args=(pc, decoder, buffered),

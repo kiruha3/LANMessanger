@@ -85,13 +85,34 @@ class Engine:
     def start(self):
         self.connections.start()
         self.discovery.start()
+        self._wd_stop = threading.Event()
+        threading.Thread(target=self._channel_watchdog, daemon=True).start()
 
     def stop(self):
+        self._wd_stop.set()
         self.discovery.stop()
         self.connections.stop()
         self.save_settings()
         if self.history:
             self.history.close()
+
+    def _channel_watchdog(self):
+        """Тестовый сигнал: сразу и далее каждые 15 сек пытаемся поднять
+        канал со всеми известными узлами (даже offline — вдруг достучимся).
+        Кто может достучаться — тот и подключается, ждать сообщения не нужно."""
+        while True:
+            for node in self.discovery.registry.snapshot():
+                if self.connections.is_connected(node.key):
+                    continue
+                now = protocol.now()
+                if now - self._dial_attempts.get(node.key, 0) < 30:
+                    continue
+                self._dial_attempts[node.key] = now
+                threading.Thread(target=self.connections.get_or_dial,
+                                 args=(node.key, node.ip, node.tcp_port),
+                                 daemon=True).start()
+            if self._wd_stop.wait(15):
+                return
 
     def set_name(self, name: str):
         self.name = name
