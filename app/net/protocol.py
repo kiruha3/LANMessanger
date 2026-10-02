@@ -11,7 +11,7 @@ from .constants import (
 )
 
 TYPES_UDP = {"announce", "response", "bye", "alert"}
-TYPES_TCP = {"msg", "ack", "read", "alert", "alert_ack", "hello",
+TYPES_TCP = {"msg", "ack", "read", "alert", "alert_ack", "hello", "ping",
              "stream_open", "stream_open_ack", "stream_data", "stream_close"}
 
 

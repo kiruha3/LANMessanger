@@ -82,6 +82,23 @@ class ConnectionManager:
         self._stop.clear()
         self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._accept_thread.start()
+        threading.Thread(target=self._keepalive_loop, daemon=True).start()
+
+    def is_connected(self, key: str) -> bool:
+        with self._lock:
+            pc = self.conns.get(key)
+        return bool(pc and pc.alive)
+
+    def _keepalive_loop(self):
+        """Ping каждые 25 сек, чтобы NAT не рвал простаивающий канал."""
+        while not self._stop.wait(25):
+            with self._lock:
+                conns = list(self.conns.values())
+            for pc in conns:
+                try:
+                    pc.send_packet("ping")
+                except OSError:
+                    pass
 
     def stop(self):
         self._stop.set()
@@ -255,6 +272,8 @@ class ConnectionManager:
         elif pkt["type"].startswith("stream_"):
             if self.on_stream:
                 self.on_stream(pkt, pc)
+        elif pkt["type"] == "ping":
+            pass  # keepalive
 
     def get_or_dial(self, key: str, ip: str, port: int) -> PeerConn | None:
         """Живое соединение с узлом: существующее или новое."""

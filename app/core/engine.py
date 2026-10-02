@@ -83,7 +83,11 @@ class Engine:
         self.save_settings()
 
     def nodes(self) -> list[Node]:
-        return self.discovery.registry.snapshot()
+        nodes = self.discovery.registry.snapshot()
+        for n in nodes:
+            if not n.online and self.connections.is_connected(n.key):
+                n.online = True  # живой TCP-канал = узел в сети, даже без UDP
+        return nodes
 
     def node_by_key(self, key: str) -> Node | None:
         for n in self.discovery.registry.snapshot():
