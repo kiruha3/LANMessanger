@@ -50,7 +50,23 @@ class Engine:
             on_message=self._on_message,
         )
         self.tunnel = TunnelManager(self.connections)
+        self._dial_attempts: dict[str, float] = {}
+        self.discovery.on_node_new = self._auto_connect
+        self.discovery.on_node_update = self._auto_connect
         self.load_settings()
+
+    def _auto_connect(self, node: Node):
+        """Канал к узлу поднимается сам, как только он обнаружен:
+        достучаться сможет хотя бы одна из сторон."""
+        if not node.online or self.connections.is_connected(node.key):
+            return
+        now = protocol.now()
+        if now - self._dial_attempts.get(node.key, 0) < 30:
+            return
+        self._dial_attempts[node.key] = now
+        threading.Thread(target=self.connections.get_or_dial,
+                         args=(node.key, node.ip, node.tcp_port),
+                         daemon=True).start()
 
     def chat(self, key: str) -> list[ChatMessage]:
         """История чата: из памяти, при первом обращении — подгрузка из БД."""
