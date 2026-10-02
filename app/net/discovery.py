@@ -78,11 +78,25 @@ class NodeRegistry:
         return gone
 
     def snapshot(self) -> list[Node]:
+        """Список узлов без дублей: один и тот же клиент (node_id) может
+        анонсироваться с нескольких адресов (белый IP, VPN, LAN) —
+        оставляем самую свежую запись. Сортировка: онлайн, потом офлайн."""
         with self._lock:
-            return sorted(
-                self._nodes.values(),
-                key=lambda n: (not n.online, n.name.lower(), n.ip),
-            )
+            nodes = list(self._nodes.values())
+        best: dict[str, Node] = {}
+        result: list[Node] = []
+        for n in nodes:
+            if not n.node_id:
+                result.append(n)  # ручной пир без id — как есть
+                continue
+            cur = best.get(n.node_id)
+            if (cur is None
+                    or (n.online and not cur.online)
+                    or (n.online == cur.online and n.last_seen > cur.last_seen)):
+                best[n.node_id] = n
+        result.extend(best.values())
+        return sorted(result,
+                      key=lambda n: (not n.online, n.name.lower(), n.ip))
 
 
 class DiscoveryService:
