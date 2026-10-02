@@ -23,6 +23,12 @@ QPushButton:hover { background: #eef4fb; border-color: #3390ec; }
 QPushButton:pressed { background: #dcebfb; }
 QPushButton:disabled { color: #999999; background: #f0f0f0; }
 QCheckBox, QLabel { background: transparent; }
+QCheckBox::indicator {
+    width: 15px; height: 15px;
+    border: 1px solid #a0a0a0; border-radius: 3px; background: #ffffff;
+}
+QCheckBox::indicator:hover { border-color: #3390ec; }
+QCheckBox::indicator:checked { background: #3390ec; border-color: #3390ec; }
 QMenu { background: #ffffff; color: #1f1f1f; border: 1px solid #d0d0d0; }
 QMenu::item:selected { background: #3390ec; color: #ffffff; }
 QToolTip { background: #ffffff; color: #1f1f1f; border: 1px solid #c8c8c8; }
@@ -56,6 +62,12 @@ QPushButton:hover { background: #4a4a4a; border-color: #3390ec; }
 QPushButton:pressed { background: #2b5278; }
 QPushButton:disabled { color: #777777; background: #333333; }
 QCheckBox, QLabel { background: transparent; }
+QCheckBox::indicator {
+    width: 15px; height: 15px;
+    border: 1px solid #666666; border-radius: 3px; background: #1f1f1f;
+}
+QCheckBox::indicator:hover { border-color: #3390ec; }
+QCheckBox::indicator:checked { background: #3390ec; border-color: #3390ec; }
 QMenu { background: #2b2b2b; color: #e6e6e6; border: 1px solid #555555; }
 QMenu::item:selected { background: #3390ec; color: #ffffff; }
 QToolTip { background: #1f1f1f; color: #e6e6e6; border: 1px solid #555555; }
