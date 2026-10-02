@@ -29,6 +29,9 @@ class PeerConn:
         with self.lock:
             self.sock.sendall(data)
 
+    def send_packet(self, ptype: str, **fields):
+        self.send_frame(protocol.encode_frame(protocol.make_packet(ptype, **fields)))
+
     def close(self):
         self.alive = False
         try:
@@ -42,6 +45,7 @@ class ConnectionManager:
         self.name = name
         self.tcp_port = tcp_port
         self.on_message = on_message
+        self.on_stream = None  # callback(pkt, PeerConn) для туннелей
         self.allowed_ips: set[str] = set()
         self.allowed_networks: list[ipaddress.IPv4Network] = []
         self.accept_all = False
@@ -248,6 +252,17 @@ class ConnectionManager:
             ev = self._pending.get(pkt.get("ack_for", ""))
             if ev:
                 ev.set()
+        elif pkt["type"].startswith("stream_"):
+            if self.on_stream:
+                self.on_stream(pkt, pc)
+
+    def get_or_dial(self, key: str, ip: str, port: int) -> PeerConn | None:
+        """Живое соединение с узлом: существующее или новое."""
+        with self._lock:
+            pc = self.conns.get(key)
+        if pc and pc.alive:
+            return pc
+        return self._dial(ip, port, key)
 
     def _handle_msg(self, pkt: dict, ip: str, conn_or_pc):
         ack = protocol.encode_frame(protocol.make_ack(self.name, pkt["id"]))

@@ -1,4 +1,5 @@
 import html
+import subprocess
 import threading
 import time
 
@@ -7,6 +8,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTextBrowser,
     QVBoxLayout,
@@ -26,7 +28,15 @@ class ChatPanel(QWidget):
         self._rendered = None
 
         self.header = QLabel("Выберите чат слева")
-        self.header.setStyleSheet("font-weight:bold; padding:6px; border-bottom:1px solid #ccc;")
+        self.header.setStyleSheet("font-weight:bold; padding:6px;")
+        self.rdp_btn = QPushButton("RDP")
+        self.rdp_btn.setToolTip("Проброс удалённого рабочего стола через канал мессенджера")
+        self.rdp_btn.setEnabled(False)
+        self.rdp_btn.clicked.connect(self._toggle_rdp)
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addWidget(self.header, 1)
+        header_row.addWidget(self.rdp_btn)
 
         self.history = QTextBrowser()
         self.input = QLineEdit()
@@ -39,7 +49,7 @@ class ChatPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.header)
+        layout.addLayout(header_row)
         layout.addWidget(self.history, 1)
         layout.addLayout(bottom)
 
@@ -64,13 +74,38 @@ class ChatPanel(QWidget):
         self.header.setText(text)
         self.history.setHtml("")
         self._set_enabled(False)
+        self.rdp_btn.setEnabled(False)
 
     def _set_enabled(self, on: bool):
         self.input.setEnabled(on)
         self.send_btn.setEnabled(on)
+        self.rdp_btn.setEnabled(on)
 
     def _node(self):
         return self.engine.node_by_key(self.key) if self.key else None
+
+    # --- RDP-туннель ---
+
+    def _toggle_rdp(self):
+        node = self._node()
+        if not node:
+            return
+        active_port = self.engine.tunnel.rdp_port(self.key)
+        if active_port:
+            self.engine.tunnel.close_rdp(self.key)
+            self._refresh(force=True)
+            return
+        ok, info = self.engine.tunnel.open_rdp(self.key, node.ip, node.tcp_port)
+        if not ok:
+            QMessageBox.warning(self, "RDP", f"Не удалось открыть туннель: {info}")
+            return
+        self._refresh(force=True)
+        try:
+            subprocess.Popen(["mstsc", f"/v:127.0.0.1:{info}"])
+        except OSError:
+            QMessageBox.information(
+                self, "RDP",
+                f"Туннель открыт. Подключитесь вручную: mstsc /v:127.0.0.1:{info}")
 
     def _send(self):
         text = self.input.text().strip()
@@ -93,6 +128,8 @@ class ChatPanel(QWidget):
         name = node.name if node else self.key
         status = "в сети" if (node and node.online) else "не в сети"
         self.header.setText(f"{name}  —  {status}")
+        port = self.engine.tunnel.rdp_port(self.key)
+        self.rdp_btn.setText(f"RDP: 127.0.0.1:{port} ✕" if port else "RDP")
 
         msgs = self.engine.chat(self.key)
         signature = (len(msgs), tuple(m.status for m in msgs))

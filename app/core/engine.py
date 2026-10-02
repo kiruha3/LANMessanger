@@ -8,6 +8,7 @@ from ..net.connections import ConnectionManager
 from ..net.constants import TCP_PORT, UDP_PORT, is_private_ip
 from ..net.discovery import DiscoveryService, Node
 from .history import History, base_dir
+from .tunnel import TunnelManager
 
 SETTINGS_FILE = os.path.join(base_dir(), "settings.json")
 DEFAULT_UDP_PORT = UDP_PORT
@@ -48,6 +49,7 @@ class Engine:
             name, tcp_port=tcp_port,
             on_message=self._on_message,
         )
+        self.tunnel = TunnelManager(self.connections)
         self.load_settings()
 
     def chat(self, key: str) -> list[ChatMessage]:
