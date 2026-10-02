@@ -42,12 +42,15 @@ class SettingsDialog(QDialog):
         feat = QGroupBox("Функции")
         self.rdp_box = Switch("RDP-туннель (кнопка в чате + приём туннелей)")
         self.rdp_box.setChecked(engine.rdp_enabled)
+        self.shadow_box = Switch("RDP: совместный сеанс (не выкидывать пользователя)")
+        self.shadow_box.setChecked(engine.shadow_rdp)
         self.scan_box = Switch("Сканер сети (кнопка «Обновить скан сети»)")
         self.scan_box.setChecked(engine.scan_enabled)
         self.push_box = Switch("Уведомления на телефон (ntfy, порт 8087)")
         self.push_box.setChecked(engine.push_status()[0])
         fl = QVBoxLayout(feat)
         fl.addWidget(self.rdp_box)
+        fl.addWidget(self.shadow_box)
         fl.addWidget(self.scan_box)
         fl.addWidget(self.push_box)
 
@@ -69,6 +72,7 @@ class SettingsDialog(QDialog):
 
         engine.set_accept_all(self.acceptall_box.isChecked())
         engine.set_feature("rdp_enabled", self.rdp_box.isChecked())
+        engine.set_feature("shadow_rdp", self.shadow_box.isChecked())
         engine.set_feature("scan_enabled", self.scan_box.isChecked())
         engine.set_push(self.push_box.isChecked())
 

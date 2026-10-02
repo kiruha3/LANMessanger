@@ -17,6 +17,31 @@ ALLOWED_REMOTE_PORTS = {3389}  # только RDP
 OPEN_TIMEOUT = 6.0
 
 
+def _active_console_session() -> int:
+    """ID активной консольной сессии Windows (без парсинга query session)."""
+    import ctypes
+
+    sid = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId()
+    if sid == 0xFFFFFFFF:
+        raise OSError("no active console session")
+    return sid
+
+
+def _shadow_allowed() -> bool:
+    """Разрешено ли теневое подключение (политика Shadow в реестре)."""
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "Shadow")
+            return int(value) in (1, 2, 3, 4)
+    except (ImportError, OSError):
+        return False
+
+
 class Stream:
     def __init__(self, sid: str, sock: socket.socket, pc: PeerConn):
         self.id = sid
@@ -47,15 +72,25 @@ class TunnelManager:
         self.streams: dict[str, Stream] = {}    # stream_id -> Stream
         self._lock = threading.Lock()
         self._open_events: dict[str, tuple] = {}
+        self._session_events: dict[str, tuple] = {}
 
     # --- инициатор ---
 
     def open_rdp(self, key: str, ip: str, port: int, local_port: int = 3390,
-                 remote_port: int = 3389) -> tuple[bool, str]:
+                 remote_port: int = 3389, shadow: bool = False) -> tuple:
+        """(ok, local_port:str, session_id:int|None).
+        shadow=True — заранее запрашиваем активную сессию удалённого ПК
+        для теневого подключения (mstsc /shadow)."""
         if key in self.tunnels:
-            return True, str(self.tunnels[key]["port"])
-        if not self.cm.get_or_dial(key, ip, port):
-            return False, "нет соединения с узлом"
+            return True, str(self.tunnels[key]["port"]), None
+        pc = self.cm.get_or_dial(key, ip, port)
+        if not pc:
+            return False, "нет соединения с узлом", None
+        session_id = None
+        if shadow:
+            ok, session_id = self._query_session(pc, key)
+            if not ok:
+                return False, session_id, None  # session_id = текст ошибки
         listener = None
         for lp in range(local_port, local_port + 10):
             try:
@@ -67,7 +102,7 @@ class TunnelManager:
             except OSError:
                 listener = None
         if listener is None:
-            return False, "не удалось занять локальный порт"
+            return False, "не удалось занять локальный порт", None
         actual_port = listener.getsockname()[1]
         self.tunnels[key] = {
             "listener": listener, "port": actual_port,
@@ -76,7 +111,31 @@ class TunnelManager:
         }
         threading.Thread(target=self._accept_loop, args=(key, listener),
                          daemon=True).start()
-        return True, str(actual_port)
+        return True, str(actual_port), session_id
+
+    def _query_session(self, pc, key: str) -> tuple:
+        """Запросить id активной консольной сессии удалённого ПК."""
+        qid = protocol.new_id()
+        ev = threading.Event()
+        res: dict = {}
+        with self._lock:
+            self._session_events[qid] = (ev, res)
+        try:
+            pc.send_packet("stream_query", id=qid)
+        except OSError:
+            with self._lock:
+                self._session_events.pop(qid, None)
+            return False, "соединение оборвалось"
+        if not ev.wait(4.0):
+            with self._lock:
+                self._session_events.pop(qid, None)
+            return False, ("узел не ответил — там старая версия приложения "
+                           "без совместного сеанса (обновите exe на обоих ПК)")
+        with self._lock:
+            self._session_events.pop(qid, None)
+        if not res.get("ok"):
+            return False, str(res.get("error", "нет активной сессии"))
+        return True, int(res["session_id"])
 
     def close_rdp(self, key: str):
         state = self.tunnels.pop(key, None)
@@ -186,11 +245,42 @@ class TunnelManager:
 
     # --- приём кадров канала ---
 
+    def _respond_session_query(self, pkt: dict, pc: PeerConn):
+        """Ответ: id активной консольной сессии для теневого подключения."""
+        sid = pkt.get("id", "")
+        if not self.enabled:
+            pc.send_packet("stream_session", id=sid, ok=False,
+                           error="RDP отключён на удалённом компьютере")
+            return
+        try:
+            session_id = _active_console_session()
+        except OSError:
+            pc.send_packet("stream_session", id=sid, ok=False,
+                           error="на удалённом ПК нет активной сессии пользователя")
+            return
+        if not _shadow_allowed():
+            pc.send_packet(
+                "stream_session", id=sid, ok=False,
+                error=("на удалённом ПК не разрешено теневое подключение: "
+                       "нужен параметр реестра Shadow=2 в HKLM\\SOFTWARE\\"
+                       "Policies\\Microsoft\\Windows NT\\Terminal Services "
+                       "(права администратора)"))
+            return
+        pc.send_packet("stream_session", id=sid, ok=True, session_id=session_id)
+
     def _on_stream(self, pkt: dict, pc: PeerConn):
         ptype = pkt["type"]
         sid = pkt.get("id", "")
         if ptype == "stream_open":
             self._respond_stream(pkt, pc)
+        elif ptype == "stream_query":
+            self._respond_session_query(pkt, pc)
+        elif ptype == "stream_session":
+            with self._lock:
+                entry = self._session_events.get(sid)
+            if entry:
+                entry[1].update(pkt)
+                entry[0].set()
         elif ptype == "stream_open_ack":
             with self._lock:
                 entry = self._open_events.get(sid)

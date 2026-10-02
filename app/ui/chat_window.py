@@ -166,17 +166,23 @@ class ChatPanel(QWidget):
             self.engine.tunnel.close_rdp(self.key)
             self._refresh(force=True)
             return
-        ok, info = self.engine.tunnel.open_rdp(self.key, node.ip, node.tcp_port)
+        ok, info, session_id = self.engine.tunnel.open_rdp(
+            self.key, node.ip, node.tcp_port, shadow=self.engine.shadow_rdp)
         if not ok:
             QMessageBox.warning(self, "RDP", f"Не удалось открыть туннель: {info}")
             return
         self._refresh(force=True)
+        if session_id:
+            args = ["mstsc", f"/shadow:{session_id}", "/control",
+                    f"/v:127.0.0.1:{info}"]
+        else:
+            args = ["mstsc", f"/v:127.0.0.1:{info}"]
         try:
-            subprocess.Popen(["mstsc", f"/v:127.0.0.1:{info}"])
+            subprocess.Popen(args)
         except OSError:
             QMessageBox.information(
                 self, "RDP",
-                f"Туннель открыт. Подключитесь вручную: mstsc /v:127.0.0.1:{info}")
+                f"Туннель открыт. Подключитесь вручную: {' '.join(args)}")
 
     def _send(self):
         text = self.input.text().strip()
