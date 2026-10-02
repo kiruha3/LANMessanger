@@ -287,6 +287,7 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         self._refresh_rejected()
+        colors = theme.node_colors()
         selected = None
         item = self.node_list.currentItem()
         if item:
@@ -301,7 +302,8 @@ class MainWindow(QMainWindow):
             text = f"● {node.name}  ({node.ip}){badge}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, node.key)
-            item.setForeground(QColor("#1a7f37") if node.online else QColor("#999"))
+            item.setForeground(QColor(colors["online"] if node.online
+                                      else colors["offline"]))
             self.node_list.addItem(item)
             if node.key == selected:
                 self.node_list.setCurrentItem(item)
@@ -313,7 +315,7 @@ class MainWindow(QMainWindow):
             text = f"◌ {ip}  {hostname or ''} — нет мессенджера"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, f"host:{ip}")
-            item.setForeground(QColor("#bbb"))
+            item.setForeground(QColor(colors["host"]))
             self.node_list.addItem(item)
             if f"host:{ip}" == selected:
                 self.node_list.setCurrentItem(item)
