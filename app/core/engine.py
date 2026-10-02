@@ -53,6 +53,7 @@ class Engine:
         self._dial_attempts: dict[str, float] = {}
         self.discovery.on_node_new = self._auto_connect
         self.discovery.on_node_update = self._auto_connect
+        self.theme = "light"
         self.load_settings()
 
     def _auto_connect(self, node: Node):
@@ -189,6 +190,10 @@ class Engine:
         self.connections.accept_all = on
         self.save_settings()
 
+    def set_theme(self, theme_name: str):
+        self.theme = theme_name
+        self.save_settings()
+
     def accept_all(self) -> bool:
         return self.connections.accept_all
 
@@ -222,6 +227,7 @@ class Engine:
             "accept_all": self.connections.accept_all,
             "allowed_ips": sorted(self.connections.allowed_ips),
             "manual_peers": self._manual_peers(),
+            "theme": self.theme,
         }
         if extra:
             data.update(extra)
@@ -238,6 +244,7 @@ class Engine:
         except (OSError, json.JSONDecodeError):
             return
         self.connections.accept_all = bool(data.get("accept_all", False))
+        self.theme = str(data.get("theme", "light"))
         for ip in data.get("allowed_ips", []):
             self.connections.allow_ip(str(ip))
         for ip in data.get("manual_peers", []):

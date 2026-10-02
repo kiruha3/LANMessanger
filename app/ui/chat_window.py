@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import theme
+
 STATUS_MARKS = {"sending": "…", "delivered": "✓✓", "failed": "✗"}
 
 
@@ -134,14 +136,21 @@ class ChatPanel(QWidget):
         msgs = self.engine.chat(self.key)
         signature = (len(msgs), tuple(m.status for m in msgs))
         if force or signature != self._rendered:
+            bar = self.history.verticalScrollBar()
+            at_bottom = bar.value() >= bar.maximum() - 20
+            prev_value = bar.value()
             self._rendered = signature
             self.history.setHtml(self._render(msgs))
-            bar = self.history.verticalScrollBar()
-            bar.setValue(bar.maximum())
+            if force or at_bottom:
+                bar.setValue(bar.maximum())
+            else:
+                bar.setValue(prev_value)  # не дёргаем скролл, если пользователь читает выше
         if self.window().isActiveWindow():
             self.engine.mark_read(self.key)
 
     def _render(self, msgs) -> str:
+        colors = theme.bubbles()
+        out_bg, in_bg, ts_color = colors["out"], colors["in"], colors["ts"]
         parts = []
         for m in msgs:
             author = html.escape(m.author)
@@ -151,14 +160,14 @@ class ChatPanel(QWidget):
                 mark = STATUS_MARKS.get(m.status, "")
                 parts.append(
                     f'<div style="margin:4px 0; text-align:right">'
-                    f'<span style="color:#888">{ts}</span> <b>{author}</b><br>'
-                    f'<span style="background:#d6eaff; padding:2px 6px; border-radius:6px">{text}</span>'
-                    f' <span style="color:#888">{mark}</span></div>'
+                    f'<span style="color:{ts_color}">{ts}</span> <b>{author}</b><br>'
+                    f'<span style="background:{out_bg}; padding:2px 6px; border-radius:6px">{text}</span>'
+                    f' <span style="color:{ts_color}">{mark}</span></div>'
                 )
             else:
                 parts.append(
                     f'<div style="margin:4px 0">'
-                    f'<b>{author}</b> <span style="color:#888">{ts}</span><br>'
-                    f'<span style="background:#eee; padding:2px 6px; border-radius:6px">{text}</span></div>'
+                    f'<b>{author}</b> <span style="color:{ts_color}">{ts}</span><br>'
+                    f'<span style="background:{in_bg}; padding:2px 6px; border-radius:6px">{text}</span></div>'
                 )
         return "".join(parts) or '<i style="color:#888">Сообщений пока нет</i>'

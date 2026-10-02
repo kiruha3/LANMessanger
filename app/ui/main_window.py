@@ -24,9 +24,8 @@ from PyQt6.QtWidgets import (
 from ..core import autostart
 from ..net import scanner
 from ..net.constants import is_private_ip
+from . import theme
 from .chat_window import ChatPanel
-
-SCAN_INTERVAL_MS = 60_000
 
 
 def make_icon(color: str = "#1a7f37") -> QIcon:
@@ -71,6 +70,10 @@ class MainWindow(QMainWindow):
         self.acceptall_box.setChecked(engine.accept_all())
         self.acceptall_box.toggled.connect(engine.set_accept_all)
 
+        self.theme_box = QCheckBox("Тёмная тема")
+        self.theme_box.setChecked(engine.theme == "dark")
+        self.theme_box.toggled.connect(self._theme_toggled)
+
         self.rejected_label = QLabel("")
         self.rejected_label.setStyleSheet("color:#c0392b")
         self.rejected_label.hide()
@@ -103,6 +106,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.name_edit)
         left_layout.addWidget(self.autostart_box)
         left_layout.addWidget(self.acceptall_box)
+        left_layout.addWidget(self.theme_box)
         left_layout.addLayout(addip_row)
         left_layout.addLayout(rejected_row)
         left_layout.addWidget(self.node_list, 1)
@@ -130,8 +134,6 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self.refresh)
         self._timer.start(1000)
         self.refresh()
-
-        QTimer.singleShot(500, self.start_scan)  # фоновый скан при запуске
 
     # --- трей ---
 
@@ -190,6 +192,11 @@ class MainWindow(QMainWindow):
             self.autostart_box.blockSignals(True)
             self.autostart_box.setChecked(not on)
             self.autostart_box.blockSignals(False)
+
+    def _theme_toggled(self, on: bool):
+        name = "dark" if on else "light"
+        theme.apply(QApplication.instance(), name)
+        self.engine.set_theme(name)
 
     def _allow_rejected(self):
         ips = self.engine.rejected_ips()
@@ -275,8 +282,6 @@ class MainWindow(QMainWindow):
             if r["ip"] not in node_ips
         }
         self.refresh()
-        # периодический фоновый рескан
-        QTimer.singleShot(SCAN_INTERVAL_MS, self.start_scan)
 
     # --- список узлов и устройств ---
 

@@ -54,10 +54,12 @@ def run_console(engine):
 def run_gui(engine):
     from PyQt6.QtWidgets import QApplication
 
+    from app.ui import theme
     from app.ui.main_window import MainWindow
 
     engine.start()
     app = QApplication(sys.argv)
+    theme.apply(app, engine.theme)
     win = MainWindow(engine)
     win.show()
     code = app.exec()
