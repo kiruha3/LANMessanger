@@ -6,6 +6,8 @@
 сообщение»: если первый фрейм не hello, а msg — обрабатываем как раньше.
 """
 
+import collections
+import ipaddress
 import socket
 import threading
 
@@ -41,6 +43,9 @@ class ConnectionManager:
         self.tcp_port = tcp_port
         self.on_message = on_message
         self.allowed_ips: set[str] = set()
+        self.allowed_networks: list[ipaddress.IPv4Network] = []
+        self.accept_all = False
+        self.rejected: collections.deque = collections.deque(maxlen=20)
         self.conns: dict[str, PeerConn] = {}
         self._lock = threading.Lock()
         self._pending: dict[str, threading.Event] = {}
@@ -50,6 +55,18 @@ class ConnectionManager:
 
     def allow_ip(self, ip: str):
         self.allowed_ips.add(ip)
+
+    def allow_network(self, cidr: str):
+        self.allowed_networks.append(ipaddress.ip_network(cidr, strict=False))
+
+    def _source_allowed(self, ip: str) -> bool:
+        if self.accept_all or is_private_ip(ip) or ip in self.allowed_ips:
+            return True
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return any(addr in net for net in self.allowed_networks)
 
     def start(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -84,7 +101,9 @@ class ConnectionManager:
                 continue
             except OSError:
                 break
-            if not (is_private_ip(addr[0]) or addr[0] in self.allowed_ips):
+            if not self._source_allowed(addr[0]):
+                with self._lock:
+                    self.rejected.append(addr[0])
                 conn.close()
                 continue
             threading.Thread(target=self._inbound, args=(conn, addr), daemon=True).start()

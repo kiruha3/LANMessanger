@@ -67,6 +67,20 @@ class MainWindow(QMainWindow):
         self.autostart_box.setChecked(autostart.is_enabled())
         self.autostart_box.toggled.connect(self._autostart_toggled)
 
+        self.acceptall_box = QCheckBox("Принимать из любых сетей (VPN/белый IP)")
+        self.acceptall_box.setChecked(engine.accept_all())
+        self.acceptall_box.toggled.connect(engine.set_accept_all)
+
+        self.rejected_label = QLabel("")
+        self.rejected_label.setStyleSheet("color:#c0392b")
+        self.rejected_label.hide()
+        self.rejected_btn = QPushButton("Разрешить")
+        self.rejected_btn.hide()
+        self.rejected_btn.clicked.connect(self._allow_rejected)
+        rejected_row = QHBoxLayout()
+        rejected_row.addWidget(self.rejected_label, 1)
+        rejected_row.addWidget(self.rejected_btn)
+
         self.addip_edit = QLineEdit()
         self.addip_edit.setPlaceholderText("IP вручную, напр. 192.168.0.5")
         self.addip_edit.returnPressed.connect(self._add_manual_peer)
@@ -88,7 +102,9 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(QLabel("Моё имя:"))
         left_layout.addWidget(self.name_edit)
         left_layout.addWidget(self.autostart_box)
+        left_layout.addWidget(self.acceptall_box)
         left_layout.addLayout(addip_row)
+        left_layout.addLayout(rejected_row)
         left_layout.addWidget(self.node_list, 1)
         left_layout.addWidget(self.scan_btn)
         left = QWidget()
@@ -175,6 +191,26 @@ class MainWindow(QMainWindow):
             self.autostart_box.setChecked(not on)
             self.autostart_box.blockSignals(False)
 
+    def _allow_rejected(self):
+        ips = self.engine.rejected_ips()
+        if not ips:
+            return
+        ip = ips[0]
+        self.engine.allow_ip(ip)
+        self.engine.dismiss_rejected(ip)
+        self.engine.add_manual_peer(ip)
+        self.refresh()
+
+    def _refresh_rejected(self):
+        ips = self.engine.rejected_ips()
+        if ips:
+            self.rejected_label.setText(f"Отклонено: {ips[0]}")
+            self.rejected_label.show()
+            self.rejected_btn.show()
+        else:
+            self.rejected_label.hide()
+            self.rejected_btn.hide()
+
     # --- ручное добавление по IP (в т.ч. белый) ---
 
     def _add_manual_peer(self):
@@ -245,6 +281,7 @@ class MainWindow(QMainWindow):
     # --- список узлов и устройств ---
 
     def refresh(self):
+        self._refresh_rejected()
         selected = None
         item = self.node_list.currentItem()
         if item:

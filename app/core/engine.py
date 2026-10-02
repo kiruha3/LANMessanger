@@ -42,6 +42,7 @@ class Engine:
             name, tcp_port=tcp_port,
             on_message=self._on_message,
         )
+        self.load_settings()
 
     def start(self):
         self.connections.start()
@@ -68,7 +69,7 @@ class Engine:
         return None
 
     def add_manual_peer(self, ip: str, udp_port: int = None,
-                        tcp_port: int = None) -> Node:
+                        tcp_port: int = None, save: bool = True) -> Node:
         """Добавить узел вручную по IP (в т.ч. белому). Возвращает узел.
 
         Для публичного IP дополнительно разрешает входящие с него."""
@@ -77,7 +78,13 @@ class Engine:
         self.discovery.add_target(ip, udp_port)
         if not is_private_ip(ip):
             self.connections.allow_ip(ip)
-        return self.discovery.registry.add_placeholder(ip, tcp_port, name=ip)
+        node = self.discovery.registry.add_placeholder(ip, tcp_port, name=ip)
+        if save:
+            peers = self._manual_peers()
+            if ip not in peers:
+                peers.append(ip)
+            self.save_settings(extra={"manual_peers": peers})
+        return node
 
     # --- отправка ---
 
@@ -126,14 +133,65 @@ class Engine:
     def unread_count(self, key: str) -> int:
         return self.unread.get(key, 0)
 
+    # --- фильтр входящих / отклонённые ---
+
+    def set_accept_all(self, on: bool):
+        self.connections.accept_all = on
+        self.save_settings()
+
+    def accept_all(self) -> bool:
+        return self.connections.accept_all
+
+    def allow_ip(self, ip: str):
+        self.connections.allow_ip(ip)
+        self.save_settings()
+
+    def rejected_ips(self) -> list[str]:
+        seen = []
+        for ip in reversed(self.connections.rejected):
+            if ip not in seen:
+                seen.append(ip)
+        return seen
+
+    def dismiss_rejected(self, ip: str):
+        self.connections.rejected = type(self.connections.rejected)(
+            (x for x in self.connections.rejected if x != ip), maxlen=20)
+
     # --- настройки (просто JSON-файл, не БД) ---
 
-    def save_settings(self):
+    def _manual_peers(self) -> list[str]:
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                return list(json.load(f).get("manual_peers", []))
+        except (OSError, json.JSONDecodeError):
+            return []
+
+    def save_settings(self, extra: dict | None = None):
+        data = {
+            "name": self.name,
+            "accept_all": self.connections.accept_all,
+            "allowed_ips": sorted(self.connections.allowed_ips),
+            "manual_peers": self._manual_peers(),
+        }
+        if extra:
+            data.update(extra)
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"name": self.name}, f, ensure_ascii=False)
+                json.dump(data, f, ensure_ascii=False)
         except OSError:
             pass
+
+    def load_settings(self):
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
+        self.connections.accept_all = bool(data.get("accept_all", False))
+        for ip in data.get("allowed_ips", []):
+            self.connections.allow_ip(str(ip))
+        for ip in data.get("manual_peers", []):
+            self.add_manual_peer(str(ip), save=False)
 
     @staticmethod
     def load_saved_name() -> str | None:

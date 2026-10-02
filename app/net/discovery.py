@@ -139,9 +139,10 @@ class DiscoveryService:
     def stop(self):
         if self._stop.is_set():
             return
-        self._broadcast(protocol.make_packet(
-            "bye", node=self.node_id, name=self.name, msg_port=self.tcp_port,
-        ))
+        if self._sock:
+            self._broadcast(protocol.make_packet(
+                "bye", node=self.node_id, name=self.name, msg_port=self.tcp_port,
+            ))
         self._stop.set()
         if self._sock:
             self._sock.close()
