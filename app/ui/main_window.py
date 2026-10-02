@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..net import scanner
 from ..net.constants import is_private_ip
 from . import theme
@@ -51,7 +52,7 @@ class MainWindow(QMainWindow):
         self._scanning = False
         self._scanned: dict[str, str] = {}  # ip -> hostname (устройства без мессенджера)
 
-        self.setWindowTitle(f"LAN Messenger — {engine.name}")
+        self.setWindowTitle(f"LAN Messenger {__version__} — {engine.name}")
         self.setWindowIcon(make_icon())
         self.resize(860, 520)
 
@@ -130,7 +131,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Открыть", self._show_from_tray)
         menu.addAction("Выйти", self._quit)
         self.tray.setContextMenu(menu)
-        self.tray.setToolTip(f"LAN Messenger — {self.engine.name}")
+        self.tray.setToolTip(f"LAN Messenger {__version__} — {self.engine.name}")
         self.tray.activated.connect(self._tray_activated)
         self.tray.messageClicked.connect(self._show_from_tray)
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -170,8 +171,8 @@ class MainWindow(QMainWindow):
         name = self.name_edit.text().strip()
         if name and name != self.engine.name:
             self.engine.set_name(name)
-            self.setWindowTitle(f"LAN Messenger — {name}")
-            self.tray.setToolTip(f"LAN Messenger — {name}")
+            self.setWindowTitle(f"LAN Messenger {__version__} — {name}")
+            self.tray.setToolTip(f"LAN Messenger {__version__} — {name}")
 
     def _open_settings(self):
         from .settings_dialog import SettingsDialog
