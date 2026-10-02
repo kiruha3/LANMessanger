@@ -63,8 +63,8 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
 
 BUBBLES = {
-    "light": {"out": "#cde6ff", "in": "#eeeeee", "ts": "#888888"},
-    "dark": {"out": "#2b5278", "in": "#3a3a3a", "ts": "#999999"},
+    "light": {"out": "#cde6ff", "in": "#eeeeee", "ts": "#888888", "accent": "#3390ec"},
+    "dark": {"out": "#2b5278", "in": "#3a3a3a", "ts": "#999999", "accent": "#6ab3f0"},
 }
 
 NODE_COLORS = {

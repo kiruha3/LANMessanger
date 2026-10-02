@@ -3,14 +3,17 @@ import subprocess
 import threading
 import time
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer
+from PyQt6.QtGui import QColor, QPainter, QTextDocument
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QTextBrowser,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -18,6 +21,65 @@ from PyQt6.QtWidgets import (
 from . import theme
 
 STATUS_MARKS = {"sending": "…", "delivered": "✓✓", "failed": "✗"}
+MAX_BUBBLE_RATIO = 0.65
+PAD_X, PAD_Y = 12, 8
+
+
+def _doc_for(msg, max_w: int) -> QTextDocument:
+    direction, author, text, ts, status = msg
+    colors = theme.bubbles()
+    ts_col = colors["ts"]
+    time_str = time.strftime("%H:%M", time.localtime(ts))
+    body = html.escape(text).replace("\n", "<br>")
+    if direction == "out":
+        meta = f'<span style="color:{ts_col}; font-size:8pt">{time_str} {STATUS_MARKS.get(status, "")}</span>'
+        content = f"{body}<br><div align='right'>{meta}</div>"
+    else:
+        meta = f'<span style="color:{ts_col}; font-size:8pt">{time_str}</span>'
+        content = (f'<b style="color:{colors["accent"]}">{html.escape(author)}</b><br>'
+                   f"{body}<br><div align='right'>{meta}</div>")
+    doc = QTextDocument()
+    doc.setHtml(content)
+    doc.setTextWidth(max_w)
+    return doc
+
+
+class BubbleDelegate(QStyledItemDelegate):
+    """Рисует сообщение как пузырь Telegram: свои справа, чужие слева."""
+
+    def paint(self, painter: QPainter, option, index):
+        msg = index.data(Qt.ItemDataRole.UserRole)
+        direction = msg[0]
+        colors = theme.bubbles()
+        rect = option.rect
+        max_w = max(120, int(rect.width() * MAX_BUBBLE_RATIO))
+        doc = _doc_for(msg, max_w - 2 * PAD_X)
+        content_w = min(max_w, int(doc.idealWidth()) + 2 * PAD_X)
+        content_h = int(doc.size().height()) + 2 * PAD_Y
+
+        if direction == "out":
+            bx = rect.right() - content_w - 8
+            bg = colors["out"]
+        else:
+            bx = rect.left() + 8
+            bg = colors["in"]
+
+        bubble = QRectF(bx, rect.top() + 2, content_w, content_h)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(bg))
+        painter.drawRoundedRect(bubble, 10, 10)
+        painter.translate(bubble.left() + PAD_X, bubble.top() + PAD_Y)
+        doc.drawContents(painter)
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:
+        msg = index.data(Qt.ItemDataRole.UserRole)
+        w = option.rect.width() or 400
+        max_w = max(120, int(w * MAX_BUBBLE_RATIO))
+        doc = _doc_for(msg, max_w - 2 * PAD_X)
+        return QSize(w, int(doc.size().height()) + 2 * PAD_Y + 6)
 
 
 class ChatPanel(QWidget):
@@ -40,7 +102,13 @@ class ChatPanel(QWidget):
         header_row.addWidget(self.header, 1)
         header_row.addWidget(self.rdp_btn)
 
-        self.history = QTextBrowser()
+        self.history = QListWidget()
+        self.history.setItemDelegate(BubbleDelegate(self.history))
+        self.history.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.history.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.history.setSpacing(2)
+        self.history.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+
         self.input = QLineEdit()
         self.input.setPlaceholderText("Сообщение… (Enter — отправить)")
         self.send_btn = QPushButton("Отправить")
@@ -74,7 +142,7 @@ class ChatPanel(QWidget):
     def show_hint(self, text: str):
         self.key = None
         self.header.setText(text)
-        self.history.setHtml("")
+        self.history.clear()
         self._set_enabled(False)
         self.rdp_btn.setEnabled(False)
 
@@ -140,34 +208,18 @@ class ChatPanel(QWidget):
             at_bottom = bar.value() >= bar.maximum() - 20
             prev_value = bar.value()
             self._rendered = signature
-            self.history.setHtml(self._render(msgs))
+            self._rebuild(msgs)
             if force or at_bottom:
                 bar.setValue(bar.maximum())
             else:
-                bar.setValue(prev_value)  # не дёргаем скролл, если пользователь читает выше
+                bar.setValue(prev_value)  # не дёргаем скролл при чтении выше
         if self.window().isActiveWindow():
             self.engine.mark_read(self.key)
 
-    def _render(self, msgs) -> str:
-        colors = theme.bubbles()
-        out_bg, in_bg, ts_color = colors["out"], colors["in"], colors["ts"]
-        parts = []
+    def _rebuild(self, msgs):
+        self.history.clear()
         for m in msgs:
-            author = html.escape(m.author)
-            text = html.escape(m.text)
-            ts = time.strftime("%H:%M:%S", time.localtime(m.timestamp))
-            if m.direction == "out":
-                mark = STATUS_MARKS.get(m.status, "")
-                parts.append(
-                    f'<div style="margin:4px 0; text-align:right">'
-                    f'<span style="color:{ts_color}">{ts}</span> <b>{author}</b><br>'
-                    f'<span style="background:{out_bg}; padding:2px 6px; border-radius:6px">{text}</span>'
-                    f' <span style="color:{ts_color}">{mark}</span></div>'
-                )
-            else:
-                parts.append(
-                    f'<div style="margin:4px 0">'
-                    f'<b>{author}</b> <span style="color:{ts_color}">{ts}</span><br>'
-                    f'<span style="background:{in_bg}; padding:2px 6px; border-radius:6px">{text}</span></div>'
-                )
-        return "".join(parts) or '<i style="color:#888">Сообщений пока нет</i>'
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole,
+                         (m.direction, m.author, m.text, m.timestamp, m.status))
+            self.history.addItem(item)
