@@ -269,16 +269,28 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         self._refresh_rejected()
+        nodes = self.engine.nodes()
+        node_ips = {n.ip for n in nodes}
+        scanned = {ip: hn for ip, hn in self._scanned.items() if ip not in node_ips}
+        signature = (
+            tuple((n.key, n.name, n.online, self.engine.unread_count(n.key))
+                  for n in nodes),
+            tuple(sorted(scanned.items())),
+        )
+        if signature == getattr(self, "_sig", None):
+            return  # ничего не изменилось — не перерисовываем (иначе прыгает)
+        self._sig = signature
+
         colors = theme.node_colors()
+        bar = self.node_list.verticalScrollBar()
+        scroll_pos = bar.value()
         selected = None
         item = self.node_list.currentItem()
         if item:
             selected = item.data(Qt.ItemDataRole.UserRole)
 
         self.node_list.clear()
-        node_ips = set()
-        for node in self.engine.nodes():
-            node_ips.add(node.ip)
+        for node in nodes:
             unread = self.engine.unread_count(node.key)
             badge = f"  [{unread}]" if unread else ""
             text = f"● {node.name}  ({node.ip}){badge}"
@@ -290,10 +302,8 @@ class MainWindow(QMainWindow):
             if node.key == selected:
                 self.node_list.setCurrentItem(item)
 
-        for ip, hostname in sorted(self._scanned.items(),
+        for ip, hostname in sorted(scanned.items(),
                                    key=lambda kv: tuple(int(p) for p in kv[0].split("."))):
-            if ip in node_ips:
-                continue
             text = f"◌ {ip}  {hostname or ''} — нет мессенджера"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, f"host:{ip}")
@@ -306,6 +316,7 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem("Поиск узлов и устройств…")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.node_list.addItem(item)
+        bar.setValue(scroll_pos)
 
     def _select(self, item):
         data = item.data(Qt.ItemDataRole.UserRole)

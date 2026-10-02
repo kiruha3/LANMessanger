@@ -1,9 +1,30 @@
 import argparse
+import ctypes
 import getpass
 import sys
 import time
 
 from app.core.engine import Engine
+
+_MUTEX_HANDLE = None
+
+
+def ensure_single_instance() -> bool:
+    """Не даём запустить второй экземпляр (иначе две копии видят друг друга
+    как «узлы» и делят входящие сообщения)."""
+    global _MUTEX_HANDLE
+    if sys.platform != "win32":
+        return True
+    kernel32 = ctypes.windll.kernel32
+    _MUTEX_HANDLE = kernel32.CreateMutexW(None, False, "LANMessenger_SingleInstance")
+    return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+
+
+def already_running_notice():
+    if sys.platform == "win32":
+        ctypes.windll.user32.MessageBoxW(
+            0, "LAN Messenger уже запущен — значок в трее.",
+            "LAN Messenger", 0x40)
 
 
 def parse_args():
@@ -69,6 +90,9 @@ def run_gui(engine):
 
 def main():
     args = parse_args()
+    if not args.console and not ensure_single_instance():
+        already_running_notice()
+        return
     name = args.name or Engine.load_saved_name() or getpass.getuser()
     engine = Engine(name, udp_port=args.udp_port, tcp_port=args.tcp_port,
                     targets=make_targets(args))

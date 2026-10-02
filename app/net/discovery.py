@@ -77,6 +77,16 @@ class NodeRegistry:
                     gone.append(node)
         return gone
 
+    def prune(self, max_age: float) -> int:
+        """Удалить узлы, давно ушедшие в офлайн (кроме ручных пиров)."""
+        cutoff = time.time() - max_age
+        with self._lock:
+            dead = [k for k, n in self._nodes.items()
+                    if not n.online and n.node_id and n.last_seen < cutoff]
+            for k in dead:
+                del self._nodes[k]
+        return len(dead)
+
     def snapshot(self) -> list[Node]:
         """Список узлов без дублей: один и тот же клиент (node_id) может
         анонсироваться с нескольких адресов (белый IP, VPN, LAN) —
@@ -230,3 +240,4 @@ class DiscoveryService:
             for node in self.registry.sweep(self.node_timeout):
                 if self.on_node_gone:
                     self.on_node_gone(node)
+            self.registry.prune(max(self.node_timeout * 80, 3600))
