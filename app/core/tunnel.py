@@ -88,9 +88,13 @@ class TunnelManager:
             return False, "нет соединения с узлом", None
         session_id = None
         if shadow:
-            ok, session_id = self._query_session(pc, key)
-            if not ok:
-                return False, session_id, None  # session_id = текст ошибки
+            ok, qres = self._query_session(pc, key)
+            if ok:
+                session_id = qres
+            else:
+                self._emit_error(
+                    key, f"совместный сеанс недоступен ({qres}) — "
+                         f"открываю обычный RDP")
         listener = None
         for lp in range(local_port, local_port + 10):
             try:

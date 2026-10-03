@@ -64,7 +64,7 @@ class Engine:
         self.push: PushServer | None = None
         self.rdp_enabled = True
         self.scan_enabled = True
-        self.shadow_rdp = True  # RDP: совместный сеанс, не выкидывать пользователя
+        self.shadow_rdp = False  # RDP: совместный сеанс (shadow) — по умолчанию выкл
         self.sort_mode = "status"  # status | name | ip
         self.load_settings()
 
@@ -327,7 +327,7 @@ class Engine:
         self.theme = str(data.get("theme", "light"))
         self.set_feature("rdp_enabled", bool(data.get("rdp_enabled", True)))
         self.scan_enabled = bool(data.get("scan_enabled", True))
-        self.shadow_rdp = bool(data.get("shadow_rdp", True))
+        self.shadow_rdp = bool(data.get("shadow_rdp", False))
         self.sort_mode = str(data.get("sort_mode", "status"))
         push = data.get("push") or {}
         if push.get("enabled"):
