@@ -4,6 +4,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .. import __version__
 from ..net import protocol
 from ..net.connections import ConnectionManager
 from ..net.constants import TCP_PORT, UDP_PORT, is_private_ip
@@ -15,6 +16,7 @@ from .tunnel import TunnelManager
 SETTINGS_FILE = os.path.join(base_dir(), "settings.json")
 DEFAULT_UDP_PORT = UDP_PORT
 DEFAULT_TCP_PORT = TCP_PORT
+DEFAULT_UPDATE_URL = "https://github.com/kiruha3/LANMessanger/releases"
 
 
 @dataclass
@@ -61,6 +63,10 @@ class Engine:
         self.tunnel.on_error = self._tunnel_error_relay
         self.on_reminder = None        # callback(event dict) — напоминание
         self.on_events_changed = None  # callback() — события изменились
+        self.on_notification = None    # callback(note dict) — колокольчик
+        self.notifications: list[dict] = []
+        self._notified_versions: set[str] = set()
+        self.update_url = DEFAULT_UPDATE_URL
         self.connections.on_connect = self._on_peer_connected
         self.connections.on_events = self._on_events_packet
         self._remind_interval = 30.0
@@ -76,8 +82,47 @@ class Engine:
         self.load_settings()
 
     def _tunnel_error_relay(self, key: str, text: str):
+        self.add_notification("RDP-туннель", text)
         if self.on_tunnel_error:
             self.on_tunnel_error(key, text)
+
+    # --- центр уведомлений ---
+
+    def add_notification(self, title: str, text: str, link: str = None,
+                         kind: str = "info"):
+        # дедупликация одинаковых уведомлений
+        for n in self.notifications:
+            if n["title"] == title and n["text"] == text and not n["read"]:
+                return
+        note = {"id": protocol.new_id(), "ts": protocol.now(), "title": title,
+                "text": text, "link": link, "kind": kind, "read": False}
+        self.notifications.append(note)
+        if self.on_notification:
+            self.on_notification(note)
+
+    def unread_notifications(self) -> int:
+        return sum(1 for n in self.notifications if not n["read"])
+
+    def mark_notifications_read(self):
+        for n in self.notifications:
+            n["read"] = True
+
+    def _check_peer_version(self, node: Node):
+        """У пира новее версия -> уведомление со ссылкой на скачивание."""
+        if not node.version or node.version in self._notified_versions:
+            return
+        try:
+            newer = tuple(int(x) for x in node.version.split(".")) > \
+                    tuple(int(x) for x in __version__.split("."))
+        except (ValueError, AttributeError):
+            return
+        if newer:
+            self._notified_versions.add(node.version)
+            self.add_notification(
+                f"Новая версия {node.version}",
+                f"У {node.name} версия {node.version} (у вас {__version__}). "
+                f"Скачать: {self.update_url}",
+                link=self.update_url, kind="update")
 
     # --- календарь: события, рассылка, напоминания ---
 
@@ -175,12 +220,17 @@ class Engine:
                 if not self._visible_to_me(ev):
                     continue
                 self.history.mark_reminded(ev["id"])
+                self.add_notification(
+                    f"Напоминание: {ev['title']}",
+                    time.strftime("%d.%m %H:%M", time.localtime(ev["ts"])),
+                    kind="reminder")
                 if self.on_reminder:
                     self.on_reminder(ev)
 
     def _auto_connect(self, node: Node):
         """Канал к узлу поднимается сам, как только он обнаружен:
         достучаться сможет хотя бы одна из сторон."""
+        self._check_peer_version(node)
         if not node.online or self.connections.is_connected(node.key):
             return
         now = protocol.now()
@@ -441,6 +491,7 @@ class Engine:
             "scan_enabled": self.scan_enabled,
             "shadow_rdp": self.shadow_rdp,
             "sort_mode": self.sort_mode,
+            "update_url": self.update_url,
             "push": {
                 "enabled": self._push_enabled,
                 "port": self._push_port,
@@ -467,6 +518,7 @@ class Engine:
         self.scan_enabled = bool(data.get("scan_enabled", True))
         self.shadow_rdp = bool(data.get("shadow_rdp", False))
         self.sort_mode = str(data.get("sort_mode", "status"))
+        self.update_url = str(data.get("update_url") or DEFAULT_UPDATE_URL)
         push = data.get("push") or {}
         if push.get("enabled"):
             self.set_push(True, int(push.get("port", 8087)),

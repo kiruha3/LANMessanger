@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QGroupBox,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -43,9 +44,12 @@ class SettingsDialog(QDialog):
         self.autostart_box.setChecked(autostart.is_enabled())
         self.theme_box = Switch("Тёмная тема")
         self.theme_box.setChecked(engine.theme == "dark")
+        self.url_edit = QLineEdit(engine.update_url)
+        self.url_edit.setPlaceholderText("Ссылка на новые версии (для уведомлений)")
         gl = QVBoxLayout(general)
         gl.addWidget(self.autostart_box)
         gl.addWidget(self.theme_box)
+        gl.addWidget(self.url_edit)
 
         # --- сеть ---
         net = QGroupBox("Сеть")
@@ -113,5 +117,9 @@ class SettingsDialog(QDialog):
         theme_name = "dark" if self.theme_box.isChecked() else "light"
         theme.apply(QApplication.instance(), theme_name)
         engine.set_theme(theme_name)
+        url = self.url_edit.text().strip()
+        if url and url != engine.update_url:
+            engine.update_url = url
+            engine.save_settings()
 
         self.accept()

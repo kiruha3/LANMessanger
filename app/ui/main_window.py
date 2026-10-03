@@ -2,8 +2,8 @@ import ipaddress
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -46,6 +46,7 @@ class MainWindow(QMainWindow):
     scan_done = pyqtSignal()
     tunnel_error = pyqtSignal(str, str)  # key, текст ошибки туннеля
     reminder = pyqtSignal(str, str)      # заголовок, текст напоминания
+    notif_received = pyqtSignal()        # новое уведомление в центре
 
     def __init__(self, engine):
         super().__init__()
@@ -134,6 +135,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(CalendarWindow(engine), "Календарь")
         self.setCentralWidget(self.tabs)
 
+        # колокольчик уведомлений в правом верхнем углу вкладок
+        self.notif_btn = QPushButton("🔔")
+        self.notif_btn.setFixedWidth(46)
+        self.notif_btn.setToolTip("Уведомления")
+        self.notif_btn.clicked.connect(self._toggle_notif_panel)
+        self.tabs.setCornerWidget(self.notif_btn, Qt.Corner.TopRightCorner)
+        self._notif_panel = None
+
         self._setup_tray()
         self.engine.on_message_event = lambda key, msg: self.message_received.emit(key)
         self.message_received.connect(self._on_new_message)
@@ -143,6 +152,8 @@ class MainWindow(QMainWindow):
         self.tunnel_error.connect(self._show_tunnel_error)
         self.engine.on_reminder = self._on_reminder
         self.reminder.connect(self._show_reminder)
+        self.engine.on_notification = lambda note: self.notif_received.emit()
+        self.notif_received.connect(self._update_notif_badge)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
@@ -182,6 +193,45 @@ class MainWindow(QMainWindow):
         if key:
             self.select_chat(key)
 
+    # --- центр уведомлений (колокольчик) ---
+
+    def _update_notif_badge(self):
+        count = self.engine.unread_notifications()
+        self.notif_btn.setText(f"🔔 {count}" if count else "🔔")
+
+    def _toggle_notif_panel(self):
+        if self._notif_panel and self._notif_panel.isVisible():
+            self._notif_panel.close()
+            return
+        panel = QListWidget(self)
+        panel.setWindowFlags(Qt.WindowType.Popup)
+        notes = list(reversed(self.engine.notifications[-50:]))
+        for n in notes:
+            when = time.strftime("%d.%m %H:%M", time.localtime(n["ts"]))
+            link_mark = "  🔗" if n.get("link") else ""
+            item = QListWidgetItem(
+                f"{when}  {n['title']}\n{n['text']}{link_mark}")
+            item.setData(Qt.ItemDataRole.UserRole, n)
+            panel.addItem(item)
+        if not notes:
+            item = QListWidgetItem("Уведомлений нет")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            panel.addItem(item)
+        panel.itemClicked.connect(self._notif_clicked)
+        panel.setMinimumWidth(360)
+        panel.setMaximumHeight(420)
+        pos = self.notif_btn.mapToGlobal(self.notif_btn.rect().bottomLeft())
+        panel.move(pos.x() - 360, pos.y() + 4)
+        panel.show()
+        self._notif_panel = panel
+        self.engine.mark_notifications_read()
+        self._update_notif_badge()
+
+    def _notif_clicked(self, item):
+        note = item.data(Qt.ItemDataRole.UserRole)
+        if note and note.get("link"):
+            QDesktopServices.openUrl(QUrl(note["link"]))
+
     def _quit(self):
         self._quitting = True
         QApplication.quit()
@@ -209,6 +259,8 @@ class MainWindow(QMainWindow):
         name = node.name if node else key
         msgs = self.engine.chat(key)
         text = msgs[-1].text[:200] if msgs else ""
+        self.engine.add_notification(f"Сообщение от {name}", text,
+                                     kind="message")
         QApplication.beep()
         if self.tray.isVisible():
             self.tray.showMessage(
