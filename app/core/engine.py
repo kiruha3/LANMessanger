@@ -25,6 +25,7 @@ class ChatMessage:
     text: str
     timestamp: int
     status: str = "received"  # out: sending -> delivered | failed
+    img: str | None = None    # имя файла в images/ (картинка из буфера)
 
 
 class Engine:
@@ -198,7 +199,8 @@ class Engine:
         msgs = []
         if self.history:
             msgs = [ChatMessage(id=r[0], direction=r[1], author=r[2],
-                                text=r[3], timestamp=r[4], status=r[5])
+                                text=r[3], timestamp=r[4], status=r[5],
+                                img=r[6] if len(r) > 6 else None)
                     for r in self.history.load(key)]
         with self._lock:
             return self.chats.setdefault(key, msgs)
@@ -279,10 +281,10 @@ class Engine:
 
     # --- отправка ---
 
-    def add_outgoing(self, key: str, text: str) -> ChatMessage:
+    def add_outgoing(self, key: str, text: str, img: str = None) -> ChatMessage:
         msg = ChatMessage(
             id=protocol.new_id(), direction="out", author=self.name,
-            text=text, timestamp=protocol.now(), status="sending",
+            text=text, timestamp=protocol.now(), status="sending", img=img,
         )
         with self._lock:
             self.chats.setdefault(key, []).append(msg)
@@ -292,11 +294,35 @@ class Engine:
 
     def deliver(self, key: str, msg: ChatMessage, ip: str, port: int):
         db_id = msg.id
-        msg_id, ok = self.connections.send(key, ip, port, msg.text)
+        img_b64 = None
+        if msg.img:
+            try:
+                import base64
+                with open(self.img_path(msg.img), "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode("ascii")
+            except OSError:
+                msg.status = "failed"
+                return
+        msg_id, ok = self.connections.send(key, ip, port, msg.text, img=img_b64)
         msg.id = msg_id
         msg.status = "delivered" if ok else "failed"
         if self.history:
             self.history.update_status(key, db_id, msg.status)
+
+    @staticmethod
+    def img_path(name: str) -> str:
+        return os.path.join(base_dir(), "images", name)
+
+    def save_incoming_img(self, msg_id: str, b64: str) -> str | None:
+        import base64
+        try:
+            os.makedirs(os.path.join(base_dir(), "images"), exist_ok=True)
+            name = f"{msg_id}.png"
+            with open(self.img_path(name), "wb") as f:
+                f.write(base64.b64decode(b64))
+            return name
+        except (OSError, ValueError):
+            return None
 
     def send(self, key: str, ip: str, port: int, text: str) -> ChatMessage:
         """Синхронная отправка (для консоли/тестов)."""
@@ -309,10 +335,14 @@ class Engine:
     def _on_message(self, pkt: dict, ip: str):
         port = int(pkt.get("msg_port") or TCP_PORT)
         key = f"{ip}:{port}"
+        img = None
+        if pkt.get("img"):
+            img = self.save_incoming_img(str(pkt.get("id")), pkt["img"])
         msg = ChatMessage(
             id=pkt.get("id", protocol.new_id()), direction="in",
             author=str(pkt.get("from") or ip), text=str(pkt.get("text") or ""),
             timestamp=int(pkt.get("timestamp") or protocol.now()),
+            img=img,
         )
         with self._lock:
             self.chats.setdefault(key, []).append(msg)

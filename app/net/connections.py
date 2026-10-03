@@ -273,12 +273,12 @@ class ConnectionManager:
     # --- отправка ---
 
     def send(self, key: str, ip: str, port: int, text: str,
-             timeout: float = 3.0) -> tuple[str, bool]:
+             timeout: float = 3.0, img: str = None) -> tuple[str, bool]:
         """Отправить сообщение. Сначала — по живому соединению (неважно,
         кто его установил), иначе — пробуем подключиться сами."""
         msg_id = protocol.new_id()
         frame = protocol.encode_frame(protocol.make_message(
-            self.name, text, msg_id=msg_id, msg_port=self.tcp_port))
+            self.name, text, msg_id=msg_id, msg_port=self.tcp_port, img=img))
 
         with self._lock:
             pc = self.conns.get(key)

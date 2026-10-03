@@ -80,12 +80,16 @@ class FrameDecoder:
         return frames
 
 
-def make_message(sender: str, text: str, msg_id: str = None, msg_port: int = None) -> bytes:
+def make_message(sender: str, text: str, msg_id: str = None, msg_port: int = None,
+                 img: str = None) -> bytes:
     if len(text.encode("utf-8")) > MAX_MESSAGE_LEN:
         raise ProtocolError("message too long")
-    fields = {"id": msg_id or new_id(), "from": sender, "timestamp": now(), "text": text}
+    fields = {"id": msg_id or new_id(), "from": sender, "timestamp": now(),
+              "text": text}
     if msg_port is not None:
         fields["msg_port"] = msg_port
+    if img is not None:
+        fields["img"] = img  # base64 PNG
     return make_packet("msg", **fields)
 
 

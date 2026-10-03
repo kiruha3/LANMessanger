@@ -161,7 +161,7 @@ class MainWindow(QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.setToolTip(f"LAN Messenger {__version__} — {self.engine.name}")
         self.tray.activated.connect(self._tray_activated)
-        self.tray.messageClicked.connect(self._show_from_tray)
+        self.tray.messageClicked.connect(self._open_last_message)
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray.show()
 
@@ -173,6 +173,14 @@ class MainWindow(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+
+    def _open_last_message(self):
+        """Клик по тосту — открыть чат с последним входящим сообщением."""
+        self._show_from_tray()
+        self.tabs.setCurrentIndex(0)
+        key = getattr(self, "_last_msg_key", None)
+        if key:
+            self.select_chat(key)
 
     def _quit(self):
         self._quitting = True
@@ -191,6 +199,7 @@ class MainWindow(QMainWindow):
     # --- события ---
 
     def _on_new_message(self, key: str):
+        self._last_msg_key = key
         self.refresh()
         if self._muted():
             return
@@ -359,6 +368,9 @@ class MainWindow(QMainWindow):
     def refresh(self):
         self._refresh_rejected()
         nodes = self._sorted_nodes(self.engine.nodes())
+        # чаты с непрочитанными — наверх (FR: новое сообщение поднимает чат)
+        nodes = ([n for n in nodes if self.engine.unread_count(n.key)]
+                 + [n for n in nodes if not self.engine.unread_count(n.key)])
         node_ips = {n.ip for n in nodes}
         scanned = {ip: hn for ip, hn in self._scanned.items() if ip not in node_ips}
         signature = (

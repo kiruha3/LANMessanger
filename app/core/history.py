@@ -21,7 +21,10 @@ class History:
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS messages ("
             "  key TEXT, id TEXT, direction TEXT, author TEXT,"
-            "  text TEXT, timestamp INTEGER, status TEXT)")
+            "  text TEXT, timestamp INTEGER, status TEXT, img TEXT)")
+        cols = [r[1] for r in self._db.execute("PRAGMA table_info(messages)")]
+        if "img" not in cols:
+            self._db.execute("ALTER TABLE messages ADD COLUMN img TEXT")
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_key ON messages(key, timestamp)")
         self._db.commit()
@@ -29,9 +32,9 @@ class History:
     def add(self, key: str, msg):
         with self._lock:
             self._db.execute(
-                "INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)",
                 (key, msg.id, msg.direction, msg.author, msg.text,
-                 msg.timestamp, msg.status))
+                 msg.timestamp, msg.status, msg.img))
             self._db.commit()
 
     def update_status(self, key: str, msg_id: str, status: str):
@@ -44,7 +47,7 @@ class History:
     def load(self, key: str, limit: int = 500) -> list[tuple]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, direction, author, text, timestamp, status"
+                "SELECT id, direction, author, text, timestamp, status, img"
                 " FROM messages WHERE key=? ORDER BY timestamp DESC LIMIT ?",
                 (key, limit)).fetchall()
         rows.reverse()

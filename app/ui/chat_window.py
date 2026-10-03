@@ -3,9 +3,10 @@ import subprocess
 import threading
 import time
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer
-from PyQt6.QtGui import QColor, QPainter, QTextDocument
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QKeySequence, QPainter, QTextDocument
 from PyQt6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core.engine import Engine
 from . import theme
 
 STATUS_MARKS = {"sending": "…", "delivered": "✓✓", "failed": "✗"}
@@ -25,13 +27,30 @@ MAX_BUBBLE_RATIO = 0.65
 PAD_X, PAD_Y = 12, 8
 
 
+class ChatInput(QLineEdit):
+    """Поле ввода: Ctrl+V с картинкой из буфера отправляет её как сообщение."""
+
+    image_pasted = pyqtSignal(object)  # QImage
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Paste):
+            img = QApplication.clipboard().image()
+            if not img.isNull():
+                self.image_pasted.emit(img)
+                return
+        super().keyPressEvent(event)
+
+
 def _layout(msg, avail_w: int):
     """Единый расчёт: документ, ширина и высота пузыря."""
-    direction, author, text, ts, status = msg
+    direction, author, text, ts, status, img = msg
     colors = theme.bubbles()
     ts_col = colors["ts"]
     time_str = time.strftime("%H:%M", time.localtime(ts))
     body = html.escape(text).replace("\n", "<br>")
+    if img:
+        path = Engine.img_path(img).replace("\\", "/")
+        body += f'<br><img src="file:///{path}" width="280">'
     mark = f" {STATUS_MARKS.get(status, '')}" if direction == "out" else ""
     meta = f' <span style="color:{ts_col}; font-size:8pt">{time_str}{mark}</span>'
     if direction == "in":
@@ -110,8 +129,9 @@ class ChatPanel(QWidget):
         self.history.setSpacing(2)
         self.history.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
 
-        self.input = QLineEdit()
-        self.input.setPlaceholderText("Сообщение… (Enter — отправить)")
+        self.input = ChatInput()
+        self.input.setPlaceholderText("Сообщение… (Enter — отправить, Ctrl+V — картинка)")
+        self.input.image_pasted.connect(self._send_image)
         self.send_btn = QPushButton("Отправить")
 
         bottom = QHBoxLayout()
@@ -198,6 +218,28 @@ class ChatPanel(QWidget):
         ).start()
         self._refresh(force=True)
 
+    def _send_image(self, qimg):
+        node = self._node()
+        if not node or qimg.isNull():
+            return
+        if max(qimg.width(), qimg.height()) > 1600:
+            qimg = qimg.scaled(1600, 1600, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+        import os
+        from ..net import protocol
+        from ..core.history import base_dir
+
+        name = f"{protocol.new_id()}.png"
+        os.makedirs(os.path.join(base_dir(), "images"), exist_ok=True)
+        qimg.save(Engine.img_path(name), "PNG")
+        msg = self.engine.add_outgoing(self.key, "", img=name)
+        threading.Thread(
+            target=self.engine.deliver,
+            args=(self.key, msg, node.ip, node.tcp_port),
+            daemon=True,
+        ).start()
+        self._refresh(force=True)
+
     def _refresh(self, force: bool = False):
         node = self._node()
         if not self.key:
@@ -229,5 +271,6 @@ class ChatPanel(QWidget):
         for m in msgs:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole,
-                         (m.direction, m.author, m.text, m.timestamp, m.status))
+                         (m.direction, m.author, m.text, m.timestamp,
+                          m.status, m.img))
             self.history.addItem(item)

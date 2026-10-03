@@ -1,6 +1,7 @@
 import time
 
 from PyQt6.QtCore import QDate, QDateTime, Qt, QTimer
+from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QCalendarWidget,
     QCheckBox,
@@ -19,9 +20,44 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import theme
+
+
+class CalendarView(QCalendarWidget):
+    """Календарь с явной раскраской: чужие месяцы, выходные, сегодня."""
+
+    def paintCell(self, painter: QPainter, rect, date: QDate):
+        dark = theme.current() == "dark"
+        cur = date.month() == self.monthShown() and date.year() == self.yearShown()
+        today = date == QDate.currentDate()
+        selected = date == self.selectedDate()
+        weekend = date.dayOfWeek() >= 6
+
+        if selected:
+            bg, fg = QColor(theme.ACCENT), QColor("#ffffff")
+        elif not cur:
+            bg = QColor("#242424" if dark else "#e9e9e9")
+            fg = QColor("#5a5a5a" if dark else "#a8a8a8")
+        elif weekend:
+            bg = QColor("#332626" if dark else "#fdeeee")
+            fg = QColor("#e57373" if dark else "#c0392b")
+        else:
+            bg = QColor("#1f1f1f" if dark else "#ffffff")
+            fg = QColor("#e6e6e6" if dark else "#1f1f1f")
+
+        painter.save()
+        painter.fillRect(rect, bg)
+        painter.setPen(fg)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(date.day()))
+        if today and not selected:
+            painter.setPen(QColor(theme.ACCENT))
+            painter.drawRect(rect.adjusted(1, 1, -1, -1))
+        painter.restore()
+
 
 class EventDialog(QDialog):
-    def __init__(self, parent, engine, event: dict | None = None):
+    def __init__(self, parent, engine, event: dict | None = None,
+                 default_date: QDate | None = None):
         super().__init__(parent)
         self.engine = engine
         self.setWindowTitle("Событие" if event is None else "Изменить событие")
@@ -30,10 +66,14 @@ class EventDialog(QDialog):
         self.title_edit = QLineEdit(event["title"] if event else "")
         self.title_edit.setPlaceholderText("Название события")
 
-        self.dt_edit = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
-        self.dt_edit.setCalendarPopup(True)
         if event:
-            self.dt_edit.setDateTime(QDateTime.fromSecsSinceEpoch(event["ts"]))
+            default_dt = QDateTime.fromSecsSinceEpoch(event["ts"])
+        elif default_date:
+            default_dt = default_date.startOfDay().addSecs(10 * 3600)
+        else:
+            default_dt = QDateTime.currentDateTime().addSecs(3600)
+        self.dt_edit = QDateTimeEdit(default_dt)
+        self.dt_edit.setCalendarPopup(True)
 
         self.remind_spin = QSpinBox()
         self.remind_spin.setRange(0, 40320)
@@ -89,8 +129,9 @@ class CalendarWindow(QWidget):
         self.setWindowTitle("Календарь")
         self.resize(640, 420)
 
-        self.calendar = QCalendarWidget()
+        self.calendar = CalendarView()
         self.calendar.clicked.connect(lambda _: self._refresh(force=True))
+        self.calendar.activated.connect(lambda _: self._add())  # двойной клик — создать
 
         self.events_list = QListWidget()
         self.events_list.itemDoubleClicked.connect(self._edit_selected)
@@ -155,7 +196,8 @@ class CalendarWindow(QWidget):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
     def _add(self):
-        dlg = EventDialog(self, self.engine)
+        dlg = EventDialog(self, self.engine,
+                          default_date=self.calendar.selectedDate())
         if dlg.exec():
             f = dlg.fields()
             if not f["title"]:

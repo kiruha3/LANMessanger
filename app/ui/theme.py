@@ -32,6 +32,11 @@ QMenu { background: #ffffff; color: #1f1f1f; border: 1px solid #d0d0d0; }
 QMenu::item:selected { background: #3390ec; color: #ffffff; }
 QToolTip { background: #ffffff; color: #1f1f1f; border: 1px solid #c8c8c8; }
 QSplitter::handle { background: #e0e0e0; }
+QCalendarWidget QHeaderView::section {
+    background: #e8f1fc; color: #1f1f1f; border: none; padding: 4px;
+    font-weight: bold; border-bottom: 2px solid #3390ec;
+}
+QCalendarWidget QTableView { background: #ffffff; }
 QScrollBar:vertical { background: transparent; width: 10px; }
 QScrollBar:horizontal { background: transparent; height: 10px; }
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
@@ -68,6 +73,11 @@ QMenu { background: #2b2b2b; color: #e6e6e6; border: 1px solid #555555; }
 QMenu::item:selected { background: #3390ec; color: #ffffff; }
 QToolTip { background: #1f1f1f; color: #e6e6e6; border: 1px solid #555555; }
 QSplitter::handle { background: #444444; }
+QCalendarWidget QHeaderView::section {
+    background: #26334a; color: #e6e6e6; border: none; padding: 4px;
+    font-weight: bold; border-bottom: 2px solid #3390ec;
+}
+QCalendarWidget QTableView { background: #1f1f1f; }
 QScrollBar:vertical { background: transparent; width: 10px; }
 QScrollBar:horizontal { background: transparent; height: 10px; }
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
