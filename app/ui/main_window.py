@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -201,10 +202,30 @@ class MainWindow(QMainWindow):
 
     def _toggle_notif_panel(self):
         if self._notif_panel and self._notif_panel.isVisible():
-            self._notif_panel.close()
+            self._notif_panel.hide()
             return
-        panel = QListWidget(self)
-        panel.setWindowFlags(Qt.WindowType.Popup)
+        # обычный дочерний виджет (НЕ Qt.Popup — Popup захватывает ввод
+        # модально и вешает приложение, если поверх открывается QMessageBox)
+        if self._notif_panel is None:
+            frame = QFrame(self)
+            frame.setStyleSheet("QFrame { border: 1px solid #888; }")
+            lay = QVBoxLayout(frame)
+            lay.setContentsMargins(4, 4, 4, 4)
+            self._notif_list = QListWidget()
+            self._notif_list.itemClicked.connect(self._notif_clicked)
+            close_btn = QPushButton("✕")
+            close_btn.setFixedWidth(32)
+            close_btn.clicked.connect(frame.hide)
+            top = QHBoxLayout()
+            top.addWidget(QLabel("Уведомления"), 1)
+            top.addWidget(close_btn)
+            lay.addLayout(top)
+            lay.addWidget(self._notif_list)
+            frame.setFixedWidth(380)
+            frame.setMaximumHeight(420)
+            self._notif_panel = frame
+
+        self._notif_list.clear()
         notes = list(reversed(self.engine.notifications[-50:]))
         for n in notes:
             when = time.strftime("%d.%m %H:%M", time.localtime(n["ts"]))
@@ -212,18 +233,16 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(
                 f"{when}  {n['title']}\n{n['text']}{link_mark}")
             item.setData(Qt.ItemDataRole.UserRole, n)
-            panel.addItem(item)
+            self._notif_list.addItem(item)
         if not notes:
             item = QListWidgetItem("Уведомлений нет")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
-            panel.addItem(item)
-        panel.itemClicked.connect(self._notif_clicked)
-        panel.setMinimumWidth(360)
-        panel.setMaximumHeight(420)
-        pos = self.notif_btn.mapToGlobal(self.notif_btn.rect().bottomLeft())
-        panel.move(pos.x() - 360, pos.y() + 4)
-        panel.show()
-        self._notif_panel = panel
+            self._notif_list.addItem(item)
+
+        x = max(0, self.width() - self._notif_panel.width() - 8)
+        self._notif_panel.move(x, self.tabs.pos().y() + 36)
+        self._notif_panel.show()
+        self._notif_panel.raise_()
         self.engine.mark_notifications_read()
         self._update_notif_badge()
 
@@ -231,6 +250,7 @@ class MainWindow(QMainWindow):
         note = item.data(Qt.ItemDataRole.UserRole)
         if note and note.get("link"):
             QDesktopServices.openUrl(QUrl(note["link"]))
+            self._notif_panel.hide()
 
     def _quit(self):
         self._quitting = True

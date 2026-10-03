@@ -1,6 +1,8 @@
 import argparse
 import ctypes
 import getpass
+import os
+import subprocess
 import sys
 import time
 
@@ -8,21 +10,54 @@ from app.core.engine import Engine
 
 _MUTEX_HANDLE = None
 MUTEX_NAME = "LANMessenger_SingleInstance"
+IMAGE_NAME = "LANMessenger.exe"
+
+
+def _kill_other_instances():
+    """Гасим старые экземпляры по имени процесса (приоритет у нового).
+    Исключаем себя и свой процесс-загрузчик PyInstaller."""
+    own = {os.getpid(), os.getppid()}
+    try:
+        res = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {IMAGE_NAME}", "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=10)
+        lines = res.stdout.decode("cp866", errors="replace").splitlines()
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    for line in lines:
+        parts = line.strip().strip('"').split('","')
+        if len(parts) >= 2 and parts[0] == IMAGE_NAME:
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                continue
+            if pid not in own:
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True)
 
 
 def ensure_single_instance() -> bool:
-    """Один экземпляр: пока старый запущен, новый не открывается.
-    Для тестов второй копии — флаг --multi."""
+    """Один экземпляр. Если запущен старый — новый закрывает его
+    (по имени процесса) и занимает его место."""
     global _MUTEX_HANDLE
     if sys.platform != "win32":
         return True
     kernel32 = ctypes.windll.kernel32
     h = kernel32.CreateMutexW(None, False, MUTEX_NAME)
-    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    if kernel32.GetLastError() != 183:  # ERROR_ALREADY_EXISTS
+        _MUTEX_HANDLE = h
+        return True
+    kernel32.CloseHandle(h)  # закрыть чужой хэндл, иначе мьютекс не умрёт
+
+    _kill_other_instances()
+    for _ in range(12):  # ждём освобождения мьютекса
+        time.sleep(0.5)
+        h = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if kernel32.GetLastError() != 183:
+            _MUTEX_HANDLE = h
+            return True
         kernel32.CloseHandle(h)
-        return False
-    _MUTEX_HANDLE = h
-    return True
+    return False
 
 
 def already_running_notice():
