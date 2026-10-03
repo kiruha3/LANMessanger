@@ -18,14 +18,15 @@ from .switch import Switch
 TS_KEY = r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
 
 
-def enable_shadow_policy() -> bool:
-    """Shadow=2 (теневое подключение с согласием пользователя).
+def set_shadow_policy(enabled: bool) -> bool:
+    """Shadow=2 (теневое с согласием) / Shadow=0 (запрещено).
     Запуск через runas — Windows покажет UAC."""
     import ctypes
 
+    value = 2 if enabled else 0
     rc = ctypes.windll.shell32.ShellExecuteW(
         None, "runas", "reg",
-        f'add "{TS_KEY}" /v Shadow /t REG_DWORD /d 2 /f',
+        f'add "{TS_KEY}" /v Shadow /t REG_DWORD /d {value} /f',
         None, 0)
     return rc > 32
 
@@ -70,11 +71,9 @@ class SettingsDialog(QDialog):
         self.rdp_box.setChecked(engine.rdp_enabled)
         self.shadow_box = Switch("RDP: совместный сеанс (не выкидывать пользователя)")
         self.shadow_box.setChecked(engine.shadow_rdp)
-        self.shadow_btn = QPushButton("Разрешить совместное подключение на этом ПК…")
-        self.shadow_btn.setToolTip(
-            "Разовая настройка: параметр Shadow=2 в реестре.\n"
-            "Понадобится подтверждение UAC (права администратора).")
-        self.shadow_btn.clicked.connect(self._enable_shadow)
+        self.shadow_btn = QPushButton()
+        self.shadow_btn.clicked.connect(self._toggle_shadow_policy)
+        self._shadow_btn_update()
         self.scan_box = Switch("Сканер сети (кнопка «Обновить скан сети»)")
         self.scan_box.setChecked(engine.scan_enabled)
         self.push_box = Switch("Уведомления на телефон (ntfy, порт 8087)")
@@ -122,17 +121,33 @@ class SettingsDialog(QDialog):
                                 "Отправлено в центр уведомлений — "
                                 "смотрите колокольчик 🔔 справа вверху.")
 
-    def _enable_shadow(self):
-        if enable_shadow_policy():
+    def _shadow_btn_update(self):
+        from ..core.tunnel import _shadow_allowed
+
+        if _shadow_allowed():
+            self.shadow_btn.setText("Совместное подключение: РАЗРЕШЕНО ✓  (нажать — запретить)")
+        else:
+            self.shadow_btn.setText("Совместное подключение: запрещено  (нажать — разрешить)")
+        self.shadow_btn.setToolTip(
+            "Политика Shadow в реестре. Изменение через UAC "
+            "(права администратора).")
+
+    def _toggle_shadow_policy(self):
+        from ..core.tunnel import _shadow_allowed
+
+        enable = not _shadow_allowed()
+        if set_shadow_policy(enable):
             QMessageBox.information(
                 self, "Совместное подключение",
-                "Команда отправлена. Если подтвердили UAC — "
-                "теневое подключение к этому ПК разрешено.")
+                ("Команда отправлена. Если подтвердили UAC — теперь "
+                 + ("РАЗРЕШЕНО." if enable else "ЗАПРЕЩЕНО.")))
         else:
             QMessageBox.warning(
                 self, "Совместное подключение",
-                "Не удалось выполнить (отменён UAC?). Можно вручную:\n"
-                f"reg add \"{TS_KEY}\" /v Shadow /t REG_DWORD /d 2 /f")
+                "Не удалось выполнить (отменён UAC?). Вручную:\n"
+                f"reg add \"{TS_KEY}\" /v Shadow /t REG_DWORD "
+                f"/d {2 if enable else 0} /f")
+        self._shadow_btn_update()
 
     def _apply(self):
         engine = self.engine
