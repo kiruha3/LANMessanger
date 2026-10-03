@@ -1,3 +1,4 @@
+import collections
 import json
 import os
 import threading
@@ -65,6 +66,15 @@ class Engine:
         self.tunnel.on_error = self._tunnel_error_relay
         self.on_reminder = None        # callback(event dict) — напоминание
         self.on_events_changed = None  # callback() — события изменились
+        self.on_rooms_changed = None   # callback() — комнаты/участники изменились
+        self.rooms: dict[str, set[str]] = {}  # комната -> ключи каналов участников
+        self.my_rooms: list[dict] = []  # {"hub_key", "hub_name", "room", "members"}
+        self._saved_rooms: list[list[str]] = []  # из settings, пере-join в start()
+        self.hub_enabled = True
+        self._seen_ids: set[str] = set()
+        self._seen_order: collections.deque = collections.deque()
+        self.connections.on_hub = self._on_hub
+        self.connections.on_disconnect = self._on_peer_disconnected
         self.on_notification = None    # callback(note dict) — колокольчик
         self.notifications: list[dict] = []
         self._notified_versions: set[str] = set()
@@ -277,6 +287,9 @@ class Engine:
         if self.history:
             self.history.init_events()
             threading.Thread(target=self._reminder_loop, daemon=True).start()
+        for hub_key, room in self._saved_rooms:
+            threading.Thread(target=self._rejoin_loop, args=(hub_key, room),
+                             daemon=True).start()
 
     def stop(self):
         self._wd_stop.set()
@@ -396,14 +409,29 @@ class Engine:
 
     # --- приём ---
 
+    def _seen_or_add(self, msg_id: str) -> bool:
+        """True, если id уже встречался (дедуп: P2P + hub могут прислать дважды).
+        Множество ограничено 5000 id, вытеснение FIFO."""
+        with self._lock:
+            if msg_id in self._seen_ids:
+                return True
+            self._seen_ids.add(msg_id)
+            self._seen_order.append(msg_id)
+            while len(self._seen_order) > 5000:
+                self._seen_ids.discard(self._seen_order.popleft())
+            return False
+
     def _on_message(self, pkt: dict, ip: str):
+        msg_id = str(pkt.get("id") or protocol.new_id())
+        if self._seen_or_add(msg_id):
+            return
         port = int(pkt.get("msg_port") or TCP_PORT)
         key = f"{ip}:{port}"
         img = None
         if pkt.get("img"):
-            img = self.save_incoming_img(str(pkt.get("id")), pkt["img"])
+            img = self.save_incoming_img(msg_id, pkt["img"])
         msg = ChatMessage(
-            id=pkt.get("id", protocol.new_id()), direction="in",
+            id=msg_id, direction="in",
             author=str(pkt.get("from") or ip), text=str(pkt.get("text") or ""),
             timestamp=int(pkt.get("timestamp") or protocol.now()),
             img=img,
@@ -417,6 +445,235 @@ class Engine:
             self.push.broadcast(msg.author, msg.text)
         if self.on_message_event:
             self.on_message_event(key, msg)
+
+    # --- комнаты (хаб + клиент) ---
+
+    @staticmethod
+    def room_chat_key(hub_key: str, room: str) -> str:
+        return f"room:{hub_key}/{room}"
+
+    def _own_hub_key(self) -> str:
+        """Ключ своих комнат у себя (канала к самому себе нет)."""
+        return f"127.0.0.1:{self.tcp_port}"
+
+    def join_room(self, hub_key: str, room: str) -> bool:
+        ip, _, port = hub_key.rpartition(":")
+        pc = self.connections.get_or_dial(hub_key, ip, int(port))
+        if not (pc and pc.alive):
+            return False
+        try:
+            pc.send_packet("hub_join", room=room)
+        except OSError:
+            return False
+        if not self._my_room(hub_key, room):
+            node = self.node_by_key(hub_key)
+            self.my_rooms.append({
+                "hub_key": hub_key,
+                "hub_name": node.name if node else ip,
+                "room": room, "members": [],
+            })
+        self.save_settings()
+        if self.on_rooms_changed:
+            self.on_rooms_changed()
+        return True
+
+    def leave_room(self, hub_key: str, room: str):
+        with self.connections._lock:
+            pc = self.connections.conns.get(hub_key)
+        if pc and pc.alive:
+            try:
+                pc.send_packet("hub_leave", room=room)
+            except OSError:
+                pass
+        self.my_rooms = [r for r in self.my_rooms
+                         if not (r["hub_key"] == hub_key and r["room"] == room)]
+        self.save_settings()
+        if self.on_rooms_changed:
+            self.on_rooms_changed()
+
+    def send_room(self, hub_key: str, room: str, text: str,
+                  img: str = None) -> ChatMessage:
+        key = self.room_chat_key(hub_key, room)
+        msg = self.add_outgoing(key, text, img)
+        self._seen_or_add(msg.id)  # своё эхо не показывать повторно
+        img_b64 = None
+        if msg.img:
+            try:
+                import base64
+                with open(self.img_path(msg.img), "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode("ascii")
+            except OSError:
+                msg.status = "failed"
+                if self.history:
+                    self.history.update_status(key, msg.id, msg.status)
+                return msg
+        fields = {"room": room, "id": msg.id, "from": self.name,
+                  "text": text, "timestamp": msg.timestamp, "img": img_b64}
+        if hub_key == self._own_hub_key():
+            # мы хаб этой комнаты: релеим участникам сами
+            ok = self._relay_room_msg(room, None, fields)
+        else:
+            with self.connections._lock:
+                pc = self.connections.conns.get(hub_key)
+            ok = False
+            if pc and pc.alive:
+                try:
+                    pc.send_packet("hub_msg", **fields)
+                    ok = True
+                except OSError:
+                    pass
+        msg.status = "delivered" if ok else "failed"
+        if self.history:
+            self.history.update_status(key, msg.id, msg.status)
+        return msg
+
+    def _my_room(self, hub_key: str, room: str) -> dict | None:
+        for r in self.my_rooms:
+            if r["hub_key"] == hub_key and r["room"] == room:
+                return r
+        return None
+
+    def _ensure_hub_room(self, room: str) -> dict:
+        """Хаб сам участник своих комнат: запись в my_rooms."""
+        entry = self._my_room(self._own_hub_key(), room)
+        if not entry:
+            entry = {"hub_key": self._own_hub_key(), "hub_name": self.name,
+                     "room": room, "members": []}
+            self.my_rooms.append(entry)
+        return entry
+
+    def _room_member_names(self, room: str) -> list[str]:
+        names = [self.name]  # хаб — тоже участник
+        for k in sorted(self.rooms.get(room, set())):
+            node = self.node_by_key(k)
+            names.append(node.name if node else k)
+        return names
+
+    def _broadcast_members(self, room: str):
+        members = self._room_member_names(room)
+        with self.connections._lock:
+            targets = [self.connections.conns.get(k)
+                       for k in self.rooms.get(room, set())]
+        for t in targets:
+            if t and t.alive:
+                try:
+                    t.send_packet("hub_members", room=room, members=members)
+                except OSError:
+                    pass
+        entry = self._ensure_hub_room(room)
+        entry["members"] = members
+        if self.on_rooms_changed:
+            self.on_rooms_changed()
+
+    def _room_remove(self, room: str, key: str):
+        members = self.rooms.get(room)
+        if not members or key not in members:
+            return
+        members.discard(key)
+        if members:
+            self._broadcast_members(room)
+        else:
+            del self.rooms[room]
+            entry = self._my_room(self._own_hub_key(), room)
+            if entry:
+                entry["members"] = [self.name]
+            if self.on_rooms_changed:
+                self.on_rooms_changed()
+
+    def _relay_room_msg(self, room: str, sender_key: str | None,
+                        fields: dict) -> bool:
+        """Релей hub_msg участникам комнаты, кроме отправителя."""
+        ok = False
+        with self.connections._lock:
+            targets = [self.connections.conns.get(k)
+                       for k in self.rooms.get(room, set())
+                       if k != sender_key]
+        for t in targets:
+            if t and t.alive:
+                try:
+                    t.send_packet("hub_msg", **fields)
+                    ok = True
+                except OSError:
+                    pass
+        return ok
+
+    def _deliver_room_msg(self, hub_key: str, pkt: dict):
+        """Входящее сообщение комнаты -> локальный чат room:<hub_key>/<room>."""
+        msg_id = str(pkt.get("id") or protocol.new_id())
+        if self._seen_or_add(msg_id):
+            return
+        room = str(pkt.get("room") or "")
+        img = None
+        if pkt.get("img"):
+            img = self.save_incoming_img(msg_id, pkt["img"])
+        msg = ChatMessage(
+            id=msg_id, direction="in",
+            author=str(pkt.get("from") or "?"),
+            text=str(pkt.get("text") or ""),
+            timestamp=int(pkt.get("timestamp") or protocol.now()),
+            img=img,
+        )
+        key = self.room_chat_key(hub_key, room)
+        with self._lock:
+            self.chats.setdefault(key, []).append(msg)
+            self.unread[key] = self.unread.get(key, 0) + 1
+        if self.history:
+            self.history.add(key, msg)
+        if self.push:
+            self.push.broadcast(msg.author, msg.text)
+        if self.on_message_event:
+            self.on_message_event(key, msg)
+
+    def _on_hub(self, pkt: dict, pc):
+        ptype = pkt["type"]
+        room = str(pkt.get("room") or "")
+        if ptype == "hub_members":
+            # клиентская сторона: хаб прислал состав комнаты
+            entry = self._my_room(pc.key, room)
+            if entry:
+                entry["members"] = list(pkt.get("members") or [])
+                if self.on_rooms_changed:
+                    self.on_rooms_changed()
+            return
+        if ptype == "hub_msg":
+            if self.hub_enabled and pc.key in self.rooms.get(room, set()):
+                # мы хаб: релей остальным + локальная копия у себя
+                fields = {"room": room, "id": pkt.get("id"),
+                          "from": pkt.get("from"), "text": pkt.get("text"),
+                          "timestamp": pkt.get("timestamp"),
+                          "img": pkt.get("img")}
+                self._relay_room_msg(room, pc.key, fields)
+                self._ensure_hub_room(room)
+                self._deliver_room_msg(self._own_hub_key(), pkt)
+            else:
+                # мы клиент: входящее сообщение комнаты от хаба
+                self._deliver_room_msg(pc.key, pkt)
+            return
+        if not self.hub_enabled:
+            return
+        if ptype == "hub_join":
+            if not room:
+                return
+            self.rooms.setdefault(room, set()).add(pc.key)
+            self._ensure_hub_room(room)
+            self._broadcast_members(room)
+        elif ptype == "hub_leave":
+            self._room_remove(room, pc.key)
+
+    def _on_peer_disconnected(self, key: str):
+        """Обрыв канала: участник пропадает из всех комнат."""
+        for room in list(self.rooms):
+            self._room_remove(room, key)
+
+    def _rejoin_loop(self, hub_key: str, room: str):
+        """Пере-join сохранённой комнаты: ретраи каждые 15 сек до успеха."""
+        while not self._wd_stop.is_set():
+            try:
+                if self.join_room(hub_key, room):
+                    return
+            except Exception:
+                pass
+            self._wd_stop.wait(15)
 
     # --- непрочитанные ---
 
@@ -519,6 +776,9 @@ class Engine:
             "scan_enabled": self.scan_enabled,
             "shadow_rdp": self.shadow_rdp,
             "sort_mode": self.sort_mode,
+            "hub_enabled": self.hub_enabled,
+            "rooms": [[r["hub_key"], r["room"]] for r in self.my_rooms
+                      if r["hub_key"] != self._own_hub_key()],
             "update_url": self.update_url,
             "update_text": self.update_text,
             "notify_update": self.notify_update,
@@ -548,6 +808,8 @@ class Engine:
         self.scan_enabled = bool(data.get("scan_enabled", True))
         self.shadow_rdp = bool(data.get("shadow_rdp", False))
         self.sort_mode = str(data.get("sort_mode", "status"))
+        self.hub_enabled = bool(data.get("hub_enabled", True))
+        self._saved_rooms = [[str(k), str(r)] for k, r in data.get("rooms", [])]
         self.update_url = str(data.get("update_url") or DEFAULT_UPDATE_URL)
         self.update_text = str(data.get("update_text") or DEFAULT_UPDATE_TEXT)
         self.notify_update = bool(data.get("notify_update", True))

@@ -52,7 +52,9 @@ class ConnectionManager:
         self.on_message = on_message
         self.on_stream = None  # callback(pkt, PeerConn) для туннелей
         self.on_events = None  # callback(pkt, PeerConn) для календаря
+        self.on_hub = None     # callback(pkt, PeerConn) для комнат (hub_*)
         self.on_connect = None  # callback(key) — канал поднят (нужен sync)
+        self.on_disconnect = None  # callback(key) — канал оборвался
         self.allowed_ips: set[str] = set()
         self.allowed_networks: list[ipaddress.IPv4Network] = []
         self.accept_all = False
@@ -276,10 +278,14 @@ class ConnectionManager:
             pass
         finally:
             pc.alive = False
+            removed = False
             with self._lock:
                 if self.conns.get(pc.key) is pc:
                     del self.conns[pc.key]
+                    removed = True
             pc.close()
+            if removed and self.on_disconnect:
+                self.on_disconnect(pc.key)
 
     # --- отправка ---
 
@@ -334,6 +340,9 @@ class ConnectionManager:
         elif pkt["type"].startswith("event_"):
             if self.on_events:
                 self.on_events(pkt, pc)
+        elif pkt["type"].startswith("hub_"):
+            if self.on_hub:
+                self.on_hub(pkt, pc)
         elif pkt["type"] == "ping":
             try:
                 pc.send_packet("pong")

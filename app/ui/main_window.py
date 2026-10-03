@@ -19,6 +19,8 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QSystemTrayIcon,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -71,6 +73,7 @@ class MainWindow(QMainWindow):
     tunnel_error = pyqtSignal(str, str)  # key, текст ошибки туннеля
     reminder = pyqtSignal(str, str)      # заголовок, текст напоминания
     notif_received = pyqtSignal()        # новое уведомление в центре
+    rooms_changed = pyqtSignal()         # состав/список комнат изменился (из engine)
 
     def __init__(self, engine):
         super().__init__()
@@ -111,7 +114,20 @@ class MainWindow(QMainWindow):
         addip_row.addWidget(self.addip_edit, 1)
         addip_row.addWidget(self.addip_btn)
 
-        self.node_list = QListWidget()
+        self.room_edit = QLineEdit()
+        self.room_edit.setPlaceholderText("комната@IP-хаба, напр. rzhd@192.168.0.5")
+        self.room_edit.returnPressed.connect(self._join_room)
+        self.room_btn = QPushButton("+")
+        self.room_btn.setFixedWidth(32)
+        self.room_btn.setToolTip("Войти в комнату на хабе")
+        self.room_btn.clicked.connect(self._join_room)
+        room_row = QHBoxLayout()
+        room_row.addWidget(self.room_edit, 1)
+        room_row.addWidget(self.room_btn)
+
+        self.node_list = QTreeWidget()
+        self.node_list.setHeaderHidden(True)
+        self.node_list.setIndentation(14)
         self.node_list.itemClicked.connect(self._select)
 
         self.sort_btn = QPushButton()
@@ -135,6 +151,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(QLabel("Моё имя:"))
         left_layout.addWidget(self.name_edit)
         left_layout.addLayout(addip_row)
+        left_layout.addLayout(room_row)
         left_layout.addLayout(rejected_row)
         left_layout.addWidget(self.sort_btn)
         left_layout.addWidget(self.node_list, 1)
@@ -179,6 +196,8 @@ class MainWindow(QMainWindow):
         self.reminder.connect(self._show_reminder)
         self.engine.on_notification = lambda note: self.notif_received.emit()
         self.notif_received.connect(self._update_notif_badge)
+        self.engine.on_rooms_changed = lambda: self.rooms_changed.emit()
+        self.rooms_changed.connect(self._on_rooms_changed)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
@@ -401,6 +420,49 @@ class MainWindow(QMainWindow):
         self.refresh()
         self.select_chat(f"{ip}:45678")
 
+    # --- вход в комнату на хабе ---
+
+    def _join_room(self):
+        text = self.room_edit.text().strip()
+        if not text:
+            return
+        if "@" not in text:
+            QMessageBox.warning(
+                self, "Комната",
+                "Формат: комната@IP-хаба, напр. rzhd@192.168.0.5")
+            return
+        room, _, ip = text.rpartition("@")
+        room, ip = room.strip(), ip.strip()
+        try:
+            ip = str(ipaddress.ip_address(ip))
+        except ValueError:
+            QMessageBox.warning(self, "Неверный IP", f"«{ip}» — не похоже на IP-адрес.")
+            return
+        if not room:
+            QMessageBox.warning(self, "Комната", "Имя комнаты пустое.")
+            return
+        join_room = getattr(self.engine, "join_room", None)
+        if join_room is None:
+            QMessageBox.warning(self, "Комната",
+                                "Эта версия ядра не поддерживает комнаты.")
+            return
+        self.engine.add_manual_peer(ip)
+        hub_key = f"{ip}:45678"
+        if not join_room(hub_key, room):
+            QMessageBox.warning(
+                self, "Комната",
+                f"Не удалось подключиться к хабу {ip}.\n"
+                "Проверьте, что там запущен мессенджер и порт TCP 45678 доступен.")
+            return
+        self.room_edit.clear()
+        self._sig = None  # в дереве появилась комната
+        self.refresh()
+        self.select_chat(f"room:{hub_key}/{room}")
+
+    def _on_rooms_changed(self):
+        self._sig = None  # состав/список комнат изменился — перерисовать
+        self.refresh()
+
     # --- скан сети (фон, живые строки) ---
 
     def start_scan(self, force: bool = False):
@@ -468,19 +530,42 @@ class MainWindow(QMainWindow):
             return sorted(nodes, key=lambda n: tuple(int(p) for p in n.ip.split(".")))
         return nodes  # status: registry уже сортирует онлайн первыми
 
-    # --- список узлов и устройств ---
+    # --- дерево узлов, комнат и устройств ---
+
+    @staticmethod
+    def _room_key(room_info: dict) -> str:
+        return f"room:{room_info.get('hub_key', '')}/{room_info.get('room', '')}"
 
     def refresh(self):
         self._refresh_rejected()
         nodes = self._sorted_nodes(self.engine.nodes())
+        rooms = list(getattr(self.engine, "my_rooms", []))
+        rooms_by_hub: dict[str, list[dict]] = {}
+        for r in rooms:
+            rooms_by_hub.setdefault(r.get("hub_key", ""), []).append(r)
+
+        def node_unread(node):
+            # свои непрочитанные + непрочитанные в комнатах этого хаба
+            total = self.engine.unread_count(node.key)
+            for r in rooms_by_hub.get(node.key, []):
+                total += self.engine.unread_count(self._room_key(r))
+            return total
+
         # чаты с непрочитанными — наверх (FR: новое сообщение поднимает чат)
-        nodes = ([n for n in nodes if self.engine.unread_count(n.key)]
-                 + [n for n in nodes if not self.engine.unread_count(n.key)])
+        nodes = ([n for n in nodes if node_unread(n)]
+                 + [n for n in nodes if not node_unread(n)])
+        node_keys = {n.key for n in nodes}
         node_ips = {n.ip for n in nodes}
+        orphan_rooms = [r for r in rooms if r.get("hub_key") not in node_keys]
         scanned = {ip: hn for ip, hn in self._scanned.items() if ip not in node_ips}
         signature = (
             tuple((n.key, n.name, n.online, self.engine.unread_count(n.key))
                   for n in nodes),
+            tuple(sorted(
+                (r.get("hub_key", ""), r.get("room", ""),
+                 len(r.get("members") or []),
+                 self.engine.unread_count(self._room_key(r)))
+                for r in rooms)),
             tuple(sorted(scanned.items())),
         )
         if signature == getattr(self, "_sig", None):
@@ -493,39 +578,68 @@ class MainWindow(QMainWindow):
         selected = None
         item = self.node_list.currentItem()
         if item:
-            selected = item.data(Qt.ItemDataRole.UserRole)
+            selected = item.data(0, Qt.ItemDataRole.UserRole)
 
         self.node_list.clear()
+        restore_item = None
         for node in nodes:
             unread = self.engine.unread_count(node.key)
             badge = f"  [{unread}]" if unread else ""
             text = f"● {node.name}  ({node.ip}){badge}"
-            item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, node.key)
-            item.setForeground(QColor(colors["online"] if node.online
-                                      else colors["offline"]))
-            self.node_list.addItem(item)
+            top = QTreeWidgetItem([text])
+            top.setData(0, Qt.ItemDataRole.UserRole, node.key)
+            color = QColor(colors["online"] if node.online else colors["offline"])
+            top.setForeground(0, color)
+            self.node_list.addTopLevelItem(top)
             if node.key == selected:
-                self.node_list.setCurrentItem(item)
+                restore_item = top
+            node_rooms = rooms_by_hub.get(node.key, [])
+            for r in node_rooms:
+                rk = self._room_key(r)
+                runread = self.engine.unread_count(rk)
+                rbadge = f"  [{runread}]" if runread else ""
+                child = QTreeWidgetItem(
+                    [f"🏠 {r.get('room', '')} ({len(r.get('members') or [])}){rbadge}"])
+                child.setData(0, Qt.ItemDataRole.UserRole, rk)
+                child.setForeground(0, color)
+                top.addChild(child)
+                if rk == selected:
+                    restore_item = child
+            if node_rooms:
+                top.setExpanded(True)  # хаб с комнатами развёрнут по умолчанию
+
+        for r in orphan_rooms:
+            rk = self._room_key(r)
+            runread = self.engine.unread_count(rk)
+            rbadge = f"  [{runread}]" if runread else ""
+            text = f"🏠 {r.get('room', '')} (через {r.get('hub_key', '')}){rbadge}"
+            item = QTreeWidgetItem([text])
+            item.setData(0, Qt.ItemDataRole.UserRole, rk)
+            item.setForeground(0, QColor(colors["offline"]))
+            self.node_list.addTopLevelItem(item)
+            if rk == selected:
+                restore_item = item
 
         for ip, hostname in sorted(scanned.items(),
                                    key=lambda kv: tuple(int(p) for p in kv[0].split("."))):
             text = f"◌ {ip}  {hostname or ''} — нет мессенджера"
-            item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, f"host:{ip}")
-            item.setForeground(QColor(colors["host"]))
-            self.node_list.addItem(item)
+            item = QTreeWidgetItem([text])
+            item.setData(0, Qt.ItemDataRole.UserRole, f"host:{ip}")
+            item.setForeground(0, QColor(colors["host"]))
+            self.node_list.addTopLevelItem(item)
             if f"host:{ip}" == selected:
-                self.node_list.setCurrentItem(item)
+                restore_item = item
 
-        if self.node_list.count() == 0:
-            item = QListWidgetItem("Поиск узлов и устройств…")
+        if self.node_list.topLevelItemCount() == 0:
+            item = QTreeWidgetItem(["Поиск узлов и устройств…"])
             item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.node_list.addItem(item)
+            self.node_list.addTopLevelItem(item)
+        if restore_item is not None:
+            self.node_list.setCurrentItem(restore_item)
         bar.setValue(scroll_pos)
 
-    def _select(self, item):
-        data = item.data(Qt.ItemDataRole.UserRole)
+    def _select(self, item, column: int = 0):
+        data = item.data(0, Qt.ItemDataRole.UserRole)
         if not data:
             return
         if data.startswith("host:"):
@@ -534,13 +648,23 @@ class MainWindow(QMainWindow):
         else:
             self.chat_panel.set_key(data)
 
+    def _find_tree_item(self, key: str):
+        for i in range(self.node_list.topLevelItemCount()):
+            top = self.node_list.topLevelItem(i)
+            if top.data(0, Qt.ItemDataRole.UserRole) == key:
+                return top
+            for j in range(top.childCount()):
+                child = top.child(j)
+                if child.data(0, Qt.ItemDataRole.UserRole) == key:
+                    return child
+        return None
+
     def select_chat(self, key: str):
-        for i in range(self.node_list.count()):
-            item = self.node_list.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == key:
-                self.node_list.setCurrentItem(item)
-                self._select(item)
-                return
+        item = self._find_tree_item(key)
+        if item is not None:
+            self.node_list.setCurrentItem(item)
+            self._select(item)
+            return
         self.chat_panel.set_key(key)
 
     def closeEvent(self, event):

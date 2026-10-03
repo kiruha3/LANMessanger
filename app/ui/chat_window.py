@@ -185,10 +185,21 @@ class ChatPanel(QWidget):
     def _set_enabled(self, on: bool):
         self.input.setEnabled(on)
         self.send_btn.setEnabled(on)
-        self.rdp_btn.setEnabled(on)
+        self.rdp_btn.setEnabled(on and self._room_parts() is None)
+
+    def _room_parts(self):
+        """Для ключа room:<hub_key>/<room> вернуть (hub_key, room), иначе None."""
+        if self.key and self.key.startswith("room:"):
+            rest = self.key[len("room:"):]
+            if "/" in rest:
+                hub_key, room = rest.rsplit("/", 1)
+                return hub_key, room
+        return None
 
     def _node(self):
-        return self.engine.node_by_key(self.key) if self.key else None
+        if not self.key or self.key.startswith("room:"):
+            return None
+        return self.engine.node_by_key(self.key)
 
     # --- RDP-туннель ---
 
@@ -231,8 +242,21 @@ class ChatPanel(QWidget):
 
     def _send(self):
         text = self.input.text().strip()
+        if not text or not self.key:
+            return
+        parts = self._room_parts()
+        if parts:
+            hub_key, room = parts
+            self.input.clear()
+            threading.Thread(
+                target=self.engine.send_room,
+                args=(hub_key, room, text),
+                daemon=True,
+            ).start()
+            self._refresh(force=True)
+            return
         node = self._node()
-        if not text or not node:
+        if not node:
             return
         self.input.clear()
         msg = self.engine.add_outgoing(self.key, text)
@@ -244,8 +268,11 @@ class ChatPanel(QWidget):
         self._refresh(force=True)
 
     def _send_image(self, qimg):
-        node = self._node()
-        if not node or qimg.isNull():
+        if qimg.isNull() or not self.key:
+            return
+        parts = self._room_parts()
+        node = None if parts else self._node()
+        if not parts and not node:
             return
         if max(qimg.width(), qimg.height()) > 1600:
             qimg = qimg.scaled(1600, 1600, Qt.AspectRatioMode.KeepAspectRatio,
@@ -257,24 +284,48 @@ class ChatPanel(QWidget):
         name = f"{protocol.new_id()}.png"
         os.makedirs(os.path.join(base_dir(), "images"), exist_ok=True)
         qimg.save(Engine.img_path(name), "PNG")
-        msg = self.engine.add_outgoing(self.key, "", img=name)
-        threading.Thread(
-            target=self.engine.deliver,
-            args=(self.key, msg, node.ip, node.tcp_port),
-            daemon=True,
-        ).start()
+        if parts:
+            hub_key, room = parts
+            threading.Thread(
+                target=self.engine.send_room,
+                args=(hub_key, room, ""),
+                kwargs={"img": name},
+                daemon=True,
+            ).start()
+        else:
+            msg = self.engine.add_outgoing(self.key, "", img=name)
+            threading.Thread(
+                target=self.engine.deliver,
+                args=(self.key, msg, node.ip, node.tcp_port),
+                daemon=True,
+            ).start()
         self._refresh(force=True)
 
     def _refresh(self, force: bool = False):
-        node = self._node()
         if not self.key:
             return
-        name = node.name if node else self.key
-        status = "в сети" if (node and node.online) else "не в сети"
-        self.header.setText(f"{name}  —  {status}")
-        port = self.engine.tunnel.rdp_port(self.key)
-        self.rdp_btn.setText(f"RDP: 127.0.0.1:{port} ✕" if port else "RDP")
-        self.rdp_btn.setVisible(self.engine.rdp_enabled)
+        parts = self._room_parts()
+        if parts:
+            hub_key, room = parts
+            info = next(
+                (r for r in getattr(self.engine, "my_rooms", [])
+                 if r.get("hub_key") == hub_key and r.get("room") == room),
+                None)
+            count = len(info.get("members") or []) if info else 0
+            hub_name = info.get("hub_name") if info else None
+            title = f"🏠 {room} — {count} участников"
+            if hub_name:
+                title += f" (хаб: {hub_name})"
+            self.header.setText(title)
+            self.rdp_btn.setVisible(False)
+        else:
+            node = self._node()
+            name = node.name if node else self.key
+            status = "в сети" if (node and node.online) else "не в сети"
+            self.header.setText(f"{name}  —  {status}")
+            port = self.engine.tunnel.rdp_port(self.key)
+            self.rdp_btn.setText(f"RDP: 127.0.0.1:{port} ✕" if port else "RDP")
+            self.rdp_btn.setVisible(self.engine.rdp_enabled)
 
         msgs = self.engine.chat(self.key)
         signature = (len(msgs), tuple(m.status for m in msgs))
