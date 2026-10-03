@@ -152,6 +152,21 @@ class ChatPanel(QWidget):
         self._timer.timeout.connect(self._refresh)
         self._timer.start(400)
 
+        from .image_viewer import ImageViewer
+
+        self.viewer = ImageViewer(self)
+        self.history.itemClicked.connect(self._maybe_open_image)
+
+    def _maybe_open_image(self, item):
+        msg = item.data(Qt.ItemDataRole.UserRole)
+        if msg and msg[5]:  # img
+            self.viewer.open_image(Engine.img_path(msg[5]))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "viewer"):
+            self.viewer.dock()
+
     def set_key(self, key: str | None):
         self.key = key
         self._rendered = None
