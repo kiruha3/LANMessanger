@@ -1,5 +1,6 @@
 import ipaddress
 import threading
+import time
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
@@ -43,6 +44,7 @@ class MainWindow(QMainWindow):
     host_found = pyqtSignal(str, str)    # ip, hostname (живые строки скана)
     scan_done = pyqtSignal()
     tunnel_error = pyqtSignal(str, str)  # key, текст ошибки туннеля
+    reminder = pyqtSignal(str, str)      # заголовок, текст напоминания
 
     def __init__(self, engine):
         super().__init__()
@@ -94,12 +96,16 @@ class MainWindow(QMainWindow):
         self.scan_btn = QPushButton("Обновить скан сети")
         self.scan_btn.clicked.connect(lambda: self.start_scan(force=True))
         self.scan_btn.setVisible(engine.scan_enabled)
+        self.cal_btn = QPushButton("Календарь…")
+        self.cal_btn.clicked.connect(self.open_calendar)
+        self._calendar = None
         self.settings_btn = QPushButton("Настройки…")
         self.settings_btn.clicked.connect(self._open_settings)
         self.exit_btn = QPushButton("Выход")
         self.exit_btn.setToolTip("Завершить процесс полностью (не сворачивать в трей)")
         self.exit_btn.clicked.connect(self._exit_clicked)
         bottom_row = QHBoxLayout()
+        bottom_row.addWidget(self.cal_btn, 1)
         bottom_row.addWidget(self.settings_btn, 1)
         bottom_row.addWidget(self.exit_btn, 1)
 
@@ -132,6 +138,8 @@ class MainWindow(QMainWindow):
         self.scan_done.connect(self._on_scan_done)
         self.engine.on_tunnel_error = lambda key, err: self.tunnel_error.emit(key, err)
         self.tunnel_error.connect(self._show_tunnel_error)
+        self.engine.on_reminder = self._on_reminder
+        self.reminder.connect(self._show_reminder)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
@@ -144,6 +152,8 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(make_icon(), self)
         menu = QMenu()
         menu.addAction("Открыть", self._show_from_tray)
+        self.mute_action = menu.addAction("Тихий режим (до перезапуска)")
+        self.mute_action.setCheckable(True)
         menu.addAction("Выйти", self._quit)
         self.tray.setContextMenu(menu)
         self.tray.setToolTip(f"LAN Messenger {__version__} — {self.engine.name}")
@@ -179,6 +189,8 @@ class MainWindow(QMainWindow):
 
     def _on_new_message(self, key: str):
         self.refresh()
+        if self._muted():
+            return
         if self.isVisible() and self.chat_panel.key == key and self.isActiveWindow():
             return
         node = self.engine.node_by_key(key)
@@ -191,6 +203,34 @@ class MainWindow(QMainWindow):
                 name, text,
                 QSystemTrayIcon.MessageIcon.Information, 5000,
             )
+
+    def _muted(self) -> bool:
+        return getattr(self, "mute_action", None) is not None \
+            and self.mute_action.isChecked()
+
+    def _on_reminder(self, ev: dict):
+        when = time.strftime("%d.%m %H:%M", time.localtime(ev["ts"]))
+        self.reminder.emit(f"Напоминание: {ev['title']}", f"{when} — {ev['title']}")
+
+    def _show_reminder(self, title: str, text: str):
+        if self._muted():
+            return
+        QApplication.beep()
+        if self.tray.isVisible():
+            self.tray.showMessage(title, text,
+                                  QSystemTrayIcon.MessageIcon.Information, 8000)
+
+    def open_calendar(self):
+        if self._calendar is None:
+            from .calendar_window import CalendarWindow
+
+            self._calendar = CalendarWindow(self.engine)
+            self._calendar.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self._calendar.destroyed.connect(
+                lambda: setattr(self, "_calendar", None))
+        self._calendar.show()
+        self._calendar.raise_()
+        self._calendar.activateWindow()
 
     def _name_changed(self):
         name = self.name_edit.text().strip()

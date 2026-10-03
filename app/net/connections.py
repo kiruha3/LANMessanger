@@ -49,6 +49,8 @@ class ConnectionManager:
         self.tcp_port = tcp_port
         self.on_message = on_message
         self.on_stream = None  # callback(pkt, PeerConn) для туннелей
+        self.on_events = None  # callback(pkt, PeerConn) для календаря
+        self.on_connect = None  # callback(key) — канал поднят (нужен sync)
         self.allowed_ips: set[str] = set()
         self.allowed_networks: list[ipaddress.IPv4Network] = []
         self.accept_all = False
@@ -231,7 +233,21 @@ class ConnectionManager:
             old.close()
         threading.Thread(target=self._reader, args=(pc, decoder, buffered),
                          daemon=True).start()
+        if self.on_connect:
+            self.on_connect(key)
         return pc
+
+    def broadcast_packet(self, ptype: str, **fields):
+        """Отправить пакет по всем живым каналам (для событий календаря)."""
+        data = protocol.encode_frame(protocol.make_packet(ptype, **fields))
+        with self._lock:
+            conns = list(self.conns.values())
+        for pc in conns:
+            if pc.alive:
+                try:
+                    pc.send_frame(data)
+                except OSError:
+                    pass
 
     def _reader(self, pc: PeerConn, decoder: protocol.FrameDecoder, buffered):
         try:
@@ -304,6 +320,9 @@ class ConnectionManager:
         elif pkt["type"].startswith("stream_"):
             if self.on_stream:
                 self.on_stream(pkt, pc)
+        elif pkt["type"].startswith("event_"):
+            if self.on_events:
+                self.on_events(pkt, pc)
         elif pkt["type"] == "ping":
             pass  # keepalive
 

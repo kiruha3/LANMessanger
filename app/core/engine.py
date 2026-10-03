@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass
 
 from ..net import protocol
@@ -57,6 +58,11 @@ class Engine:
         self.tunnel = TunnelManager(self.connections)
         self.on_tunnel_error = None  # callback(key, текст) для UI
         self.tunnel.on_error = self._tunnel_error_relay
+        self.on_reminder = None        # callback(event dict) — напоминание
+        self.on_events_changed = None  # callback() — события изменились
+        self.connections.on_connect = self._on_peer_connected
+        self.connections.on_events = self._on_events_packet
+        self._remind_interval = 30.0
         self._dial_attempts: dict[str, float] = {}
         self.discovery.on_node_new = self._auto_connect
         self.discovery.on_node_update = self._auto_connect
@@ -71,6 +77,105 @@ class Engine:
     def _tunnel_error_relay(self, key: str, text: str):
         if self.on_tunnel_error:
             self.on_tunnel_error(key, text)
+
+    # --- календарь: события, рассылка, напоминания ---
+
+    @staticmethod
+    def _event_out(ev: dict) -> dict:
+        return {k: ev[k] for k in ("id", "title", "ts", "remind_min",
+                                   "creator", "participants", "updated_at",
+                                   "deleted")}
+
+    def add_event(self, title: str, ts: int, remind_min: int = 15,
+                  participants: list | None = None) -> dict | None:
+        if not self.history:
+            return None
+        ev = {"id": protocol.new_id(), "title": title, "ts": int(ts),
+              "remind_min": int(remind_min), "creator": self.name,
+              "participants": participants or [], "updated_at": protocol.now(),
+              "deleted": False}
+        self.history.upsert_event(ev)
+        self.connections.broadcast_packet("event_add", **self._event_out(ev))
+        if self.on_events_changed:
+            self.on_events_changed()
+        return ev
+
+    def update_event(self, event_id: str, **fields):
+        if not self.history:
+            return
+        cur = [e for e in self.history.all_events() if e["id"] == event_id]
+        if not cur:
+            return
+        ev = cur[0]
+        ev.update(fields)
+        ev["updated_at"] = protocol.now()
+        self.history.upsert_event(ev)
+        self.connections.broadcast_packet("event_add", **self._event_out(ev))
+        if self.on_events_changed:
+            self.on_events_changed()
+
+    def delete_event(self, event_id: str):
+        """Мягкое удаление: tombstone, иначе событие воскреснет при sync."""
+        self.update_event(event_id, deleted=True)
+
+    def visible_events(self) -> list[dict]:
+        if not self.history:
+            return []
+        return [e for e in self.history.all_events()
+                if self._visible_to_me(e)]
+
+    def _visible_to_me(self, ev: dict) -> bool:
+        if ev["creator"] == self.name:
+            return True
+        parts = ev.get("participants") or []
+        return "all" in parts or self.name in parts
+
+    def _on_events_packet(self, pkt: dict, pc):
+        ptype = pkt["type"]
+        changed = False
+        if ptype == "event_add":
+            ev = {k: pkt.get(k) for k in ("id", "title", "ts", "remind_min",
+                                          "creator", "participants",
+                                          "updated_at", "deleted")}
+            changed = bool(self.history and self.history.upsert_event(ev))
+        elif ptype == "event_sync":
+            for raw in pkt.get("events", []):
+                ev = {k: raw.get(k) for k in ("id", "title", "ts",
+                                              "remind_min", "creator",
+                                              "participants", "updated_at",
+                                              "deleted")}
+                if self.history and self.history.upsert_event(ev):
+                    changed = True
+        if changed and self.on_events_changed:
+            self.on_events_changed()
+
+    def _on_peer_connected(self, key: str):
+        """Новый канал — отдать свои события (включая tombstones)."""
+        def _send():
+            time.sleep(0.5)
+            with self.connections._lock:
+                pc = self.connections.conns.get(key)
+            if not (pc and pc.alive and self.history):
+                return
+            evs = [self._event_out(e)
+                   for e in self.history.all_events(include_deleted=True)]
+            if evs:
+                try:
+                    pc.send_packet("event_sync", events=evs)
+                except OSError:
+                    pass
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _reminder_loop(self):
+        """Раз в remind_interval сек: события в окне напоминания → алерт.
+        Флаг reminded в БД защищает от дублей (в отличие от чистого поллинга)."""
+        while not self._wd_stop.wait(self._remind_interval):
+            for ev in self.history.due_events(protocol.now()):
+                if not self._visible_to_me(ev):
+                    continue
+                self.history.mark_reminded(ev["id"])
+                if self.on_reminder:
+                    self.on_reminder(ev)
 
     def _auto_connect(self, node: Node):
         """Канал к узлу поднимается сам, как только он обнаружен:
@@ -103,6 +208,9 @@ class Engine:
         self.discovery.start()
         self._wd_stop.clear()
         threading.Thread(target=self._channel_watchdog, daemon=True).start()
+        if self.history:
+            self.history.init_events()
+            threading.Thread(target=self._reminder_loop, daemon=True).start()
 
     def stop(self):
         self._wd_stop.set()
