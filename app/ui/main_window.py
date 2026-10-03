@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSplitter,
     QSystemTrayIcon,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -96,16 +97,12 @@ class MainWindow(QMainWindow):
         self.scan_btn = QPushButton("Обновить скан сети")
         self.scan_btn.clicked.connect(lambda: self.start_scan(force=True))
         self.scan_btn.setVisible(engine.scan_enabled)
-        self.cal_btn = QPushButton("Календарь…")
-        self.cal_btn.clicked.connect(self.open_calendar)
-        self._calendar = None
         self.settings_btn = QPushButton("Настройки…")
         self.settings_btn.clicked.connect(self._open_settings)
         self.exit_btn = QPushButton("Выход")
         self.exit_btn.setToolTip("Завершить процесс полностью (не сворачивать в трей)")
         self.exit_btn.clicked.connect(self._exit_clicked)
         bottom_row = QHBoxLayout()
-        bottom_row.addWidget(self.cal_btn, 1)
         bottom_row.addWidget(self.settings_btn, 1)
         bottom_row.addWidget(self.exit_btn, 1)
 
@@ -129,7 +126,13 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.chat_panel)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([300, 560])
-        self.setCentralWidget(splitter)
+
+        from .calendar_window import CalendarWindow
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(splitter, "Чаты")
+        self.tabs.addTab(CalendarWindow(engine), "Календарь")
+        self.setCentralWidget(self.tabs)
 
         self._setup_tray()
         self.engine.on_message_event = lambda key, msg: self.message_received.emit(key)
@@ -219,18 +222,6 @@ class MainWindow(QMainWindow):
         if self.tray.isVisible():
             self.tray.showMessage(title, text,
                                   QSystemTrayIcon.MessageIcon.Information, 8000)
-
-    def open_calendar(self):
-        if self._calendar is None:
-            from .calendar_window import CalendarWindow
-
-            self._calendar = CalendarWindow(self.engine)
-            self._calendar.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-            self._calendar.destroyed.connect(
-                lambda: setattr(self, "_calendar", None))
-        self._calendar.show()
-        self._calendar.raise_()
-        self._calendar.activateWindow()
 
     def _name_changed(self):
         name = self.name_edit.text().strip()

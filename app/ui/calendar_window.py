@@ -123,7 +123,7 @@ class CalendarWindow(QWidget):
 
     def _day_range(self) -> tuple[int, int]:
         d: QDate = self.calendar.selectedDate()
-        start = QDateTime(d).toSecsSinceEpoch()
+        start = d.startOfDay().toSecsSinceEpoch()
         return start, start + 86400
 
     def _events_for_day(self) -> list[dict]:
