@@ -485,6 +485,13 @@ class Engine:
         return key == self._own_hub_key()
 
     def join_room(self, hub_key: str, room: str) -> bool:
+        if self._is_own_key(hub_key):
+            # своя комната у себя — дозвон не нужен, только локальная запись
+            self._ensure_hub_room(room)
+            self.save_settings()
+            if self.on_rooms_changed:
+                self.on_rooms_changed()
+            return True
         ip, _, port = hub_key.rpartition(":")
         node = self.node_by_key(hub_key)
         if node is None:
@@ -741,6 +748,8 @@ class Engine:
 
     def _rejoin_loop(self, hub_key: str, room: str):
         """Пере-join сохранённой комнаты: ретраи каждые 15 сек до успеха."""
+        if self._is_own_key(hub_key):
+            return  # к самому себе дозваниваться не надо
         while not self._wd_stop.is_set():
             try:
                 if self.join_room(hub_key, room):
