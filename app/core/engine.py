@@ -554,7 +554,13 @@ class Engine:
 
     def _room_member_names(self, room: str) -> list[str]:
         names = [self.name]  # хаб — тоже участник
+        with self.connections._lock:
+            conns = dict(self.connections.conns)
         for k in sorted(self.rooms.get(room, set())):
+            pc = conns.get(k)
+            if pc and getattr(pc, "peer_name", None):
+                names.append(pc.peer_name)
+                continue
             node = self.node_by_key(k)
             names.append(node.name if node else k)
         return names

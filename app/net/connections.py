@@ -28,6 +28,7 @@ class PeerConn:
         self.alive = True
         self.outbound = False    # мы инициировали это соединение
         self.peer_node = None    # node_id пира из его hello
+        self.peer_name = None    # имя пира из его hello
         self.last_pong = None    # время последнего pong (None = пир старый/не отвечал)
 
     def send_frame(self, data: bytes):
@@ -173,8 +174,10 @@ class ConnectionManager:
             if first["type"] == "hello":
                 peer_port = int(first.get("msg_port") or TCP_PORT)
                 key = f"{addr[0]}:{peer_port}"
-                self._register(key, conn, decoder, frames[1:],
-                               outbound=False, peer_node=first.get("node"))
+                pc = self._register(key, conn, decoder, frames[1:],
+                                    outbound=False, peer_node=first.get("node"))
+                if pc and not pc.peer_name:
+                    pc.peer_name = str(first.get("name") or "")
             else:
                 # старый клиент: одно сообщение — один коннект, регистрировать нечего
                 self._handle_msg(first, addr[0], conn)
