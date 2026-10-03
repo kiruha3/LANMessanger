@@ -15,7 +15,7 @@ TYPES_TCP = {"msg", "ack", "read", "alert", "alert_ack", "hello", "ping", "pong"
              "stream_open", "stream_open_ack", "stream_data", "stream_close",
              "stream_query", "stream_session",
              "event_add", "event_delete", "event_sync",
-             "hub_join", "hub_leave", "hub_msg", "hub_members"}
+             "hub_join", "hub_leave", "hub_msg", "hub_members", "hub_error"}
 
 
 class ProtocolError(ValueError):

@@ -220,12 +220,22 @@ class Engine:
             self.on_events_changed()
 
     def _on_peer_connected(self, key: str):
-        """Новый канал — отдать свои события (включая tombstones)."""
+        """Новый канал — отдать свои события (включая tombstones)
+        и перезайти в комнаты этого хаба (после обрыва членство теряется)."""
         def _send():
             time.sleep(0.5)
             with self.connections._lock:
                 pc = self.connections.conns.get(key)
-            if not (pc and pc.alive and self.history):
+            if not (pc and pc.alive):
+                return
+            # re-join комнат, привязанных к этому хабу
+            for entry in self.my_rooms:
+                if entry["hub_key"] == key:
+                    try:
+                        pc.send_packet("hub_join", room=entry["room"])
+                    except OSError:
+                        pass
+            if not self.history:
                 return
             evs = [self._event_out(e)
                    for e in self.history.all_events(include_deleted=True)]
@@ -661,9 +671,26 @@ class Engine:
                 self._relay_room_msg(room, pc.key, fields)
                 self._ensure_hub_room(room)
                 self._deliver_room_msg(self._own_hub_key(), pkt)
+            elif self.hub_enabled:
+                # хаб: отправителя нет в комнате (вылетел при обрыве) —
+                # сообщим, клиент сам перезайдёт
+                try:
+                    pc.send_packet("hub_error", code="not_in_room", room=room)
+                except OSError:
+                    pass
             else:
                 # мы клиент: входящее сообщение комнаты от хаба
                 self._deliver_room_msg(pc.key, pkt)
+            return
+        if ptype == "hub_error":
+            # хаб сказал, что нас нет в комнате — перезаходим
+            if pkt.get("code") == "not_in_room":
+                entry = self._my_room(pc.key, room)
+                if entry:
+                    try:
+                        pc.send_packet("hub_join", room=room)
+                    except OSError:
+                        pass
             return
         if not self.hub_enabled:
             return

@@ -228,6 +228,9 @@ class ChatPanel(QWidget):
             QMessageBox.warning(self, "RDP", f"Не удалось открыть туннель: {info}")
             return
         self._refresh(force=True)
+        QMessageBox.information(
+            self, "RDP",
+            f"Туннель открыт к {node.name}: mstsc на 127.0.0.1:{info}")
         if session_id:
             args = ["mstsc", f"/shadow:{session_id}", "/control",
                     f"/v:127.0.0.1:{info}"]
@@ -324,7 +327,11 @@ class ChatPanel(QWidget):
             status = "в сети" if (node and node.online) else "не в сети"
             self.header.setText(f"{name}  —  {status}")
             port = self.engine.tunnel.rdp_port(self.key)
-            self.rdp_btn.setText(f"RDP: 127.0.0.1:{port} ✕" if port else "RDP")
+            if port:
+                self.rdp_btn.setText(f"RDP: 127.0.0.1:{port} → {name} ✕")
+                self.rdp_btn.setToolTip(f"Туннель к {name} ({node.ip if node else ''})")
+            else:
+                self.rdp_btn.setText("RDP")
             self.rdp_btn.setVisible(self.engine.rdp_enabled)
 
         msgs = self.engine.chat(self.key)
