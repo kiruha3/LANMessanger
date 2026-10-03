@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 
 from .. import __version__
-from ..net import protocol
+from ..net import crypto, protocol
 from ..net.connections import ConnectionManager
 from ..net.constants import TCP_PORT, UDP_PORT, is_private_ip
 from ..net.discovery import DiscoveryService, Node
@@ -300,8 +300,9 @@ class Engine:
         if self.history:
             self.history.init_events()
             threading.Thread(target=self._reminder_loop, daemon=True).start()
-        for hub_key, room in self._saved_rooms:
-            threading.Thread(target=self._rejoin_loop, args=(hub_key, room),
+        for hub_key, room, password in self._saved_rooms:
+            threading.Thread(target=self._rejoin_loop,
+                             args=(hub_key, room, password),
                              daemon=True).start()
 
     def stop(self):
@@ -418,12 +419,19 @@ class Engine:
     def save_incoming_img(self, msg_id: str, b64: str) -> str | None:
         import base64
         try:
+            data = base64.b64decode(b64)
+        except ValueError:
+            return None
+        return self.save_incoming_img_bytes(msg_id, data)
+
+    def save_incoming_img_bytes(self, msg_id: str, data: bytes) -> str | None:
+        try:
             os.makedirs(os.path.join(base_dir(), "images"), exist_ok=True)
             name = f"{msg_id}.png"
             with open(self.img_path(name), "wb") as f:
-                f.write(base64.b64decode(b64))
+                f.write(data)
             return name
-        except (OSError, ValueError):
+        except OSError:
             return None
 
     def send(self, key: str, ip: str, port: int, text: str) -> ChatMessage:
@@ -484,10 +492,10 @@ class Engine:
     def _is_own_key(self, key: str) -> bool:
         return key == self._own_hub_key()
 
-    def join_room(self, hub_key: str, room: str) -> bool:
+    def join_room(self, hub_key: str, room: str, password: str = None) -> bool:
         if self._is_own_key(hub_key):
             # своя комната у себя — дозвон не нужен, только локальная запись
-            self._ensure_hub_room(room)
+            self._ensure_hub_room(room, password)
             self.save_settings()
             if self.on_rooms_changed:
                 self.on_rooms_changed()
@@ -505,12 +513,16 @@ class Engine:
             pc.send_packet("hub_join", room=room)
         except OSError:
             return False
-        if not self._my_room(hub_key, room):
+        entry = self._my_room(hub_key, room)
+        if not entry:
             self.my_rooms.append({
                 "hub_key": hub_key,
                 "hub_name": node.name,
                 "room": room, "members": [],
+                "password": password,
             })
+        elif password is not None:
+            entry["password"] = password
         self.save_settings()
         if self.on_rooms_changed:
             self.on_rooms_changed()
@@ -535,19 +547,31 @@ class Engine:
         key = self.room_chat_key(hub_key, room)
         msg = self.add_outgoing(key, text, img)
         self._seen_or_add(msg.id)  # своё эхо не показывать повторно
-        img_b64 = None
+        img_raw = None
         if msg.img:
             try:
-                import base64
                 with open(self.img_path(msg.img), "rb") as f:
-                    img_b64 = base64.b64encode(f.read()).decode("ascii")
+                    img_raw = f.read()
             except OSError:
                 msg.status = "failed"
                 if self.history:
                     self.history.update_status(key, msg.id, msg.status)
                 return msg
+        entry = self._my_room(hub_key, room)
+        password = entry.get("password") if entry else None
         fields = {"room": room, "id": msg.id, "from": self.name,
-                  "text": text, "timestamp": msg.timestamp, "img": img_b64}
+                  "timestamp": msg.timestamp}
+        if password:
+            rk = crypto.room_key(password, room)
+            fields["text"] = crypto.encrypt(rk, text.encode("utf-8"))
+            fields["img"] = (crypto.encrypt(rk, img_raw)
+                             if img_raw is not None else None)
+            fields["enc"] = True
+        else:
+            import base64
+            fields["text"] = text
+            fields["img"] = (base64.b64encode(img_raw).decode("ascii")
+                             if img_raw is not None else None)
         if hub_key == self._own_hub_key():
             # мы хаб этой комнаты: релеим участникам сами
             ok = self._relay_room_msg(room, None, fields)
@@ -572,7 +596,7 @@ class Engine:
                 return r
         return None
 
-    def _ensure_hub_room(self, room: str) -> dict:
+    def _ensure_hub_room(self, room: str, password: str = None) -> dict:
         """Хаб сам участник своих комнат: запись в my_rooms + узел своего ПК."""
         own = self._own_hub_key()
         ip, _, port = own.rpartition(":")
@@ -582,8 +606,10 @@ class Engine:
         entry = self._my_room(own, room)
         if not entry:
             entry = {"hub_key": own, "hub_name": self.name,
-                     "room": room, "members": []}
+                     "room": room, "members": [], "password": password}
             self.my_rooms.append(entry)
+        elif password is not None:
+            entry["password"] = password
         return entry
 
     def _room_member_names(self, room: str) -> list[str]:
@@ -653,13 +679,28 @@ class Engine:
         if self._seen_or_add(msg_id):
             return
         room = str(pkt.get("room") or "")
+        text = str(pkt.get("text") or "")
         img = None
-        if pkt.get("img"):
+        if crypto.is_encrypted(pkt):
+            entry = self._my_room(hub_key, room)
+            password = entry.get("password") if entry else None
+            plain = (crypto.decrypt(crypto.room_key(password, room), text)
+                     if password else None)
+            if plain is None:
+                text = "[не удалось расшифровать — неверный пароль]"
+            else:
+                text = plain.decode("utf-8", errors="replace")
+                if pkt.get("img"):
+                    img_raw = crypto.decrypt(
+                        crypto.room_key(password, room), pkt["img"])
+                    if img_raw is not None:
+                        img = self.save_incoming_img_bytes(msg_id, img_raw)
+        elif pkt.get("img"):
             img = self.save_incoming_img(msg_id, pkt["img"])
         msg = ChatMessage(
             id=msg_id, direction="in",
             author=str(pkt.get("from") or "?"),
-            text=str(pkt.get("text") or ""),
+            text=text,
             timestamp=int(pkt.get("timestamp") or protocol.now()),
             img=img,
         )
@@ -694,10 +735,13 @@ class Engine:
                 self._deliver_room_msg(pc.key, pkt)
             elif self.hub_enabled and pc.key in self.rooms.get(room, set()):
                 # мы хаб: релей остальным + локальная копия у себя
+                # enc/text/img релеим как есть, не расшифровывая
                 fields = {"room": room, "id": pkt.get("id"),
                           "from": pkt.get("from"), "text": pkt.get("text"),
                           "timestamp": pkt.get("timestamp"),
                           "img": pkt.get("img")}
+                if crypto.is_encrypted(pkt):
+                    fields["enc"] = True
                 self._relay_room_msg(room, pc.key, fields)
                 self._ensure_hub_room(room)
                 self._deliver_room_msg(self._own_hub_key(), pkt)
@@ -746,13 +790,13 @@ class Engine:
                 self.connections.get_or_dial(key, ip, int(port))
         threading.Thread(target=_redial, daemon=True).start()
 
-    def _rejoin_loop(self, hub_key: str, room: str):
+    def _rejoin_loop(self, hub_key: str, room: str, password: str = None):
         """Пере-join сохранённой комнаты: ретраи каждые 15 сек до успеха."""
         if self._is_own_key(hub_key):
             return  # к самому себе дозваниваться не надо
         while not self._wd_stop.is_set():
             try:
-                if self.join_room(hub_key, room):
+                if self.join_room(hub_key, room, password):
                     return
             except Exception:
                 pass
@@ -860,7 +904,8 @@ class Engine:
             "shadow_rdp": self.shadow_rdp,
             "sort_mode": self.sort_mode,
             "hub_enabled": self.hub_enabled,
-            "rooms": [[r["hub_key"], r["room"]] for r in self.my_rooms
+            "rooms": [[r["hub_key"], r["room"], r.get("password")]
+                      for r in self.my_rooms
                       if r["hub_key"] != self._own_hub_key()],
             "update_url": self.update_url,
             "update_text": self.update_text,
@@ -892,7 +937,12 @@ class Engine:
         self.shadow_rdp = bool(data.get("shadow_rdp", False))
         self.sort_mode = str(data.get("sort_mode", "status"))
         self.hub_enabled = bool(data.get("hub_enabled", True))
-        self._saved_rooms = [[str(k), str(r)] for k, r in data.get("rooms", [])]
+        self._saved_rooms = []
+        for item in data.get("rooms", []):
+            # формат: [hub_key, room] или [hub_key, room, password]
+            hub_key, room = str(item[0]), str(item[1])
+            password = (str(item[2]) if len(item) > 2 and item[2] else None)
+            self._saved_rooms.append([hub_key, room, password])
         saved_url = str(data.get("update_url") or "")
         # миграция со старых дефолтов (страница релизов) на прямую ссылку
         if saved_url.startswith("https://github.com/kiruha3/LANMessanger/releases"):

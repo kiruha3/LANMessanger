@@ -113,6 +113,10 @@ class ChatPanel(QWidget):
 
         self.header = QLabel("Выберите чат слева")
         self.header.setStyleSheet("font-weight:bold; padding:6px;")
+        self.invite_btn = QPushButton("Пригласить")
+        self.invite_btn.setToolTip("Код-приглашение в комнату для пересылки")
+        self.invite_btn.setVisible(False)
+        self.invite_btn.clicked.connect(self._show_invite)
         self.rdp_btn = QPushButton("RDP")
         self.rdp_btn.setToolTip("Проброс удалённого рабочего стола через канал мессенджера")
         self.rdp_btn.setEnabled(False)
@@ -120,6 +124,7 @@ class ChatPanel(QWidget):
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.addWidget(self.header, 1)
+        header_row.addWidget(self.invite_btn)
         header_row.addWidget(self.rdp_btn)
 
         self.history = QListWidget()
@@ -181,6 +186,7 @@ class ChatPanel(QWidget):
         self.history.clear()
         self._set_enabled(False)
         self.rdp_btn.setEnabled(False)
+        self.invite_btn.setVisible(False)
 
     def _set_enabled(self, on: bool):
         self.input.setEnabled(on)
@@ -200,6 +206,40 @@ class ChatPanel(QWidget):
         if not self.key or self.key.startswith("room:"):
             return None
         return self.engine.node_by_key(self.key)
+
+    def _room_info(self) -> dict | None:
+        """Запись текущей комнаты из engine.my_rooms (или None)."""
+        parts = self._room_parts()
+        if not parts:
+            return None
+        hub_key, room = parts
+        return next(
+            (r for r in getattr(self.engine, "my_rooms", [])
+             if r.get("hub_key") == hub_key and r.get("room") == room),
+            None)
+
+    # --- приглашение в комнату ---
+
+    def _show_invite(self):
+        parts = self._room_parts()
+        if not parts:
+            return
+        hub_key, room = parts
+        info = self._room_info() or {}
+        password = info.get("password") or None
+        ip = hub_key.rpartition(":")[0]
+        code = f"{room}:{password}@{ip}" if password else f"{room}@{ip}"
+        box = QMessageBox(self)
+        box.setWindowTitle("Приглашение в комнату")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(
+            "Перешлите этот код — по нему можно войти в комнату "
+            f"«{room}» (строка входа слева в главном окне):")
+        edit = QLineEdit(code, box)
+        edit.setReadOnly(True)
+        edit.selectAll()
+        box.layout().addWidget(edit, 1, 0, 1, box.layout().columnCount())
+        box.exec()
 
     # --- RDP-туннель ---
 
@@ -310,17 +350,17 @@ class ChatPanel(QWidget):
         parts = self._room_parts()
         if parts:
             hub_key, room = parts
-            info = next(
-                (r for r in getattr(self.engine, "my_rooms", [])
-                 if r.get("hub_key") == hub_key and r.get("room") == room),
-                None)
+            info = self._room_info()
             count = len(info.get("members") or []) if info else 0
             hub_name = info.get("hub_name") if info else None
-            title = f"🏠 {room} — {count} участников"
+            title = f"[комната] {room} — {count} участников"
             if hub_name:
                 title += f" (хаб: {hub_name})"
+            if info and info.get("password"):
+                title += " [закрытая]"
             self.header.setText(title)
             self.rdp_btn.setVisible(False)
+            self.invite_btn.setVisible(True)
         else:
             node = self._node()
             name = node.name if node else self.key
@@ -333,6 +373,7 @@ class ChatPanel(QWidget):
             else:
                 self.rdp_btn.setText("RDP")
             self.rdp_btn.setVisible(self.engine.rdp_enabled)
+            self.invite_btn.setVisible(False)
 
         msgs = self.engine.chat(self.key)
         signature = (len(msgs), tuple(m.status for m in msgs))

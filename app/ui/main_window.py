@@ -115,7 +115,8 @@ class MainWindow(QMainWindow):
         addip_row.addWidget(self.addip_btn)
 
         self.room_edit = QLineEdit()
-        self.room_edit.setPlaceholderText("комната@IP-хаба, напр. rzhd@192.168.0.5")
+        self.room_edit.setPlaceholderText(
+            "комната[:пароль]@IP-хаба, напр. rzhd:secret@192.168.0.5")
         self.room_edit.returnPressed.connect(self._join_room)
         self.room_btn = QPushButton("+")
         self.room_btn.setFixedWidth(32)
@@ -432,10 +433,19 @@ class MainWindow(QMainWindow):
         if "@" not in text:
             QMessageBox.warning(
                 self, "Комната",
-                "Формат: комната@IP-хаба, напр. rzhd@192.168.0.5")
+                "Формат: комната[:пароль]@IP-хаба, напр. rzhd@192.168.0.5 "
+                "или rzhd:secret@192.168.0.5")
             return
-        room, _, ip = text.rpartition("@")
-        room, ip = room.strip(), ip.strip()
+        left, _, ip = text.rpartition("@")
+        left, ip = left.strip(), ip.strip()
+        # "комната:пароль" — пароль отделяется по ПЕРВОМУ ":" (может сам
+        # содержать ":", но не "@"); пустой пароль = без пароля
+        password = None
+        room = left
+        if ":" in left:
+            room, _, pw = left.partition(":")
+            room = room.strip()
+            password = pw or None
         try:
             ip = str(ipaddress.ip_address(ip))
         except ValueError:
@@ -451,7 +461,11 @@ class MainWindow(QMainWindow):
             return
         self.engine.add_manual_peer(ip)
         hub_key = f"{ip}:45678"
-        if not join_room(hub_key, room):
+        try:
+            ok = join_room(hub_key, room, password=password)
+        except TypeError:
+            ok = join_room(hub_key, room)  # ядро без поддержки паролей
+        if not ok:
             QMessageBox.warning(
                 self, "Комната",
                 f"Не удалось подключиться к хабу {ip}.\n"
@@ -602,7 +616,7 @@ class MainWindow(QMainWindow):
                 runread = self.engine.unread_count(rk)
                 rbadge = f"  [{runread}]" if runread else ""
                 child = QTreeWidgetItem(
-                    [f"🏠 {r.get('room', '')} ({len(r.get('members') or [])}){rbadge}"])
+                    [f"[комната] {r.get('room', '')} ({len(r.get('members') or [])}){rbadge}"])
                 child.setData(0, Qt.ItemDataRole.UserRole, rk)
                 child.setForeground(0, color)
                 top.addChild(child)
@@ -615,7 +629,7 @@ class MainWindow(QMainWindow):
             rk = self._room_key(r)
             runread = self.engine.unread_count(rk)
             rbadge = f"  [{runread}]" if runread else ""
-            text = f"🏠 {r.get('room', '')} (через {r.get('hub_key', '')}){rbadge}"
+            text = f"[комната] {r.get('room', '')} (через {r.get('hub_key', '')}){rbadge}"
             item = QTreeWidgetItem([text])
             item.setData(0, Qt.ItemDataRole.UserRole, rk)
             item.setForeground(0, QColor(colors["offline"]))
