@@ -356,6 +356,16 @@ class Engine:
             self.save_settings(extra={"manual_peers": peers})
         return node
 
+    def remove_manual_peer(self, ip: str):
+        """Удалить ручной пир из списка и настроек."""
+        peers = self._manual_peers()
+        if ip in peers:
+            peers.remove(ip)
+            self.save_settings(extra={"manual_peers": peers})
+        self.discovery.targets = [t for t in self.discovery.targets
+                                  if t[0] != ip]
+        self.discovery.registry.remove(f"{ip}:{DEFAULT_TCP_PORT}")
+
     # --- отправка ---
 
     def add_outgoing(self, key: str, text: str, img: str = None) -> ChatMessage:

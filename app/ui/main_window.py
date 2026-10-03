@@ -129,6 +129,9 @@ class MainWindow(QMainWindow):
         self.node_list.setHeaderHidden(True)
         self.node_list.setIndentation(14)
         self.node_list.itemClicked.connect(self._select)
+        self.node_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.node_list.customContextMenuRequested.connect(self._tree_context_menu)
 
         self.sort_btn = QPushButton()
         self.sort_btn.setToolTip("Порядок списка: клик — следующий режим")
@@ -647,6 +650,36 @@ class MainWindow(QMainWindow):
             self.chat_panel.show_hint(f"{ip} — на устройстве нет мессенджера")
         else:
             self.chat_panel.set_key(data)
+
+    def _tree_context_menu(self, pos):
+        item = self.node_list.itemAt(pos)
+        if not item:
+            return
+        key = item.data(0, Qt.ItemDataRole.UserRole)
+        if not key:
+            return
+        menu = QMenu(self)
+        if key.startswith("room:"):
+            menu.addAction("Покинуть комнату",
+                           lambda: self._leave_room(key))
+        else:
+            node = self.engine.node_by_key(key)
+            if node and node.ip in self.engine._manual_peers():
+                menu.addAction("Удалить из списка",
+                               lambda: self._remove_peer(node.ip))
+        if menu.actions():
+            menu.exec(self.node_list.viewport().mapToGlobal(pos))
+
+    def _leave_room(self, key: str):
+        hub_key, _, room = key[len("room:"):].rpartition("/")
+        self.engine.leave_room(hub_key, room)
+        self._sig = None
+        self.refresh()
+
+    def _remove_peer(self, ip: str):
+        self.engine.remove_manual_peer(ip)
+        self._sig = None
+        self.refresh()
 
     def _find_tree_item(self, key: str):
         for i in range(self.node_list.topLevelItemCount()):

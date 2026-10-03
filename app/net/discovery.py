@@ -74,6 +74,10 @@ class NodeRegistry:
                 self._nodes[key] = node
             return node
 
+    def remove(self, key: str) -> bool:
+        with self._lock:
+            return self._nodes.pop(key, None) is not None
+
     def sweep(self, timeout: float) -> list[Node]:
         cutoff = time.time() - timeout
         gone = []
