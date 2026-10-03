@@ -23,6 +23,8 @@ class Node:
     last_seen: float = field(default_factory=time.time)
     online: bool = True
     version: str = ""
+    update_url: str = ""
+    update_text: str = ""
 
     @property
     def key(self) -> str:
@@ -35,7 +37,7 @@ class NodeRegistry:
         self._lock = threading.Lock()
 
     def upsert(self, node_id: str, ip: str, name: str, tcp_port: int,
-               version: str = "") -> tuple[Node, bool]:
+               version: str = "", update_url: str = "", update_text: str = "") -> tuple[Node, bool]:
         with self._lock:
             key = f"{ip}:{tcp_port}"
             node = self._nodes.get(key)
@@ -46,6 +48,8 @@ class NodeRegistry:
             node.node_id = node_id
             node.name = name
             node.version = version or node.version
+            node.update_url = update_url or node.update_url
+            node.update_text = update_text or node.update_text
             node.last_seen = time.time()
             node.online = True
             return node, is_new
@@ -139,6 +143,8 @@ class DiscoveryService:
 
         from .. import __version__
         self.app_version = __version__
+        self.update_url = ""
+        self.update_text = ""
         self.node_id = uuid.uuid4().hex
         self.registry = NodeRegistry()
         self._sock: socket.socket | None = None
@@ -189,7 +195,7 @@ class DiscoveryService:
     def _announce(self):
         self._broadcast(protocol.make_packet(
             "announce", node=self.node_id, name=self.name, msg_port=self.tcp_port,
-            version=self.app_version,
+            version=self.app_version, upd=self.update_url, updt=self.update_text,
         ))
 
     def _send_loop(self):
@@ -224,7 +230,9 @@ class DiscoveryService:
         name = str(pkt.get("name") or ip)
         if ptype in ("announce", "response"):
             node, is_new = self.registry.upsert(pkt.get("node", ""), ip, name, tcp_port,
-                                            version=str(pkt.get("version") or ""))
+                                            version=str(pkt.get("version") or ""),
+                                            update_url=str(pkt.get("upd") or ""),
+                                            update_text=str(pkt.get("updt") or ""))
             if is_new and self.on_node_new:
                 self.on_node_new(node)
             elif not is_new and self.on_node_update:
@@ -232,7 +240,7 @@ class DiscoveryService:
             if ptype == "announce":
                 reply = protocol.make_packet(
                     "response", node=self.node_id, name=self.name, msg_port=self.tcp_port,
-                        version=self.app_version,
+                        version=self.app_version, upd=self.update_url, updt=self.update_text,
                 )
                 try:
                     self._sock.sendto(reply, (ip, port))

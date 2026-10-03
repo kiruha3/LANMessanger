@@ -16,7 +16,9 @@ from .tunnel import TunnelManager
 SETTINGS_FILE = os.path.join(base_dir(), "settings.json")
 DEFAULT_UDP_PORT = UDP_PORT
 DEFAULT_TCP_PORT = TCP_PORT
-DEFAULT_UPDATE_URL = "https://github.com/kiruha3/LANMessanger/releases"
+DEFAULT_UPDATE_URL = "https://github.com/kiruha3/LANMessanger/releases/latest"
+DEFAULT_UPDATE_TEXT = ("У {name} новая версия {ver} (у вас {my}). "
+                       "Скачать: {url}")
 
 
 @dataclass
@@ -67,6 +69,8 @@ class Engine:
         self.notifications: list[dict] = []
         self._notified_versions: set[str] = set()
         self.update_url = DEFAULT_UPDATE_URL
+        self.update_text = DEFAULT_UPDATE_TEXT
+        self.notify_update = True
         self.connections.on_connect = self._on_peer_connected
         self.connections.on_events = self._on_events_packet
         self._remind_interval = 30.0
@@ -108,21 +112,31 @@ class Engine:
             n["read"] = True
 
     def _check_peer_version(self, node: Node):
-        """У пира новее версия -> уведомление со ссылкой на скачивание."""
-        if not node.version or node.version in self._notified_versions:
+        """У пира новее версия -> информационное уведомление.
+        Ссылка — от уведомляющего клиента (его update_url из announce),
+        иначе наша. Текст — редактируемый шаблон в настройках."""
+        if not self.notify_update or not node.version:
+            return
+        if node.version in self._notified_versions:
             return
         try:
             newer = tuple(int(x) for x in node.version.split(".")) > \
                     tuple(int(x) for x in __version__.split("."))
         except (ValueError, AttributeError):
             return
-        if newer:
-            self._notified_versions.add(node.version)
-            self.add_notification(
-                f"Новая версия {node.version}",
-                f"У {node.name} версия {node.version} (у вас {__version__}). "
-                f"Скачать: {self.update_url}",
-                link=self.update_url, kind="update")
+        if not newer:
+            return
+        self._notified_versions.add(node.version)
+        url = node.update_url or self.update_url
+        template = node.update_text or self.update_text
+        try:
+            text = template.format(name=node.name, ver=node.version,
+                                   my=__version__, url=url)
+        except (KeyError, IndexError):
+            text = self.update_text.format(name=node.name, ver=node.version,
+                                           my=__version__, url=url)
+        self.add_notification(f"Новая версия {node.version}", text,
+                              link=url, kind="update")
 
     # --- календарь: события, рассылка, напоминания ---
 
@@ -423,6 +437,20 @@ class Engine:
         self.theme = theme_name
         self.save_settings()
 
+    def set_update_url(self, url: str):
+        self.update_url = url
+        self.discovery.update_url = url  # уезжает в announce сразу
+        self.save_settings()
+
+    def set_update_text(self, text: str):
+        self.update_text = text
+        self.discovery.update_text = text  # уезжает в announce сразу
+        self.save_settings()
+
+    def set_notify_update(self, on: bool):
+        self.notify_update = bool(on)
+        self.save_settings()
+
     def set_feature(self, name: str, on: bool):
         """Фичефлаг: rdp_enabled / scan_enabled."""
         setattr(self, name, bool(on))
@@ -492,6 +520,8 @@ class Engine:
             "shadow_rdp": self.shadow_rdp,
             "sort_mode": self.sort_mode,
             "update_url": self.update_url,
+            "update_text": self.update_text,
+            "notify_update": self.notify_update,
             "push": {
                 "enabled": self._push_enabled,
                 "port": self._push_port,
@@ -519,6 +549,10 @@ class Engine:
         self.shadow_rdp = bool(data.get("shadow_rdp", False))
         self.sort_mode = str(data.get("sort_mode", "status"))
         self.update_url = str(data.get("update_url") or DEFAULT_UPDATE_URL)
+        self.update_text = str(data.get("update_text") or DEFAULT_UPDATE_TEXT)
+        self.notify_update = bool(data.get("notify_update", True))
+        self.discovery.update_url = self.update_url
+        self.discovery.update_text = self.update_text
         push = data.get("push") or {}
         if push.get("enabled"):
             self.set_push(True, int(push.get("port", 8087)),

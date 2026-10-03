@@ -46,10 +46,15 @@ class SettingsDialog(QDialog):
         self.theme_box.setChecked(engine.theme == "dark")
         self.url_edit = QLineEdit(engine.update_url)
         self.url_edit.setPlaceholderText("Ссылка на новые версии (для уведомлений)")
+        self.text_edit = QLineEdit(engine.update_text)
+        self.text_edit.setPlaceholderText("Текст уведомления: {name} {ver} {my} {url}")
         gl = QVBoxLayout(general)
         gl.addWidget(self.autostart_box)
         gl.addWidget(self.theme_box)
+        gl.addWidget(QLabel("Ссылка на новые версии:"))
         gl.addWidget(self.url_edit)
+        gl.addWidget(QLabel("Текст уведомления о версии:"))
+        gl.addWidget(self.text_edit)
 
         # --- сеть ---
         net = QGroupBox("Сеть")
@@ -73,12 +78,18 @@ class SettingsDialog(QDialog):
         self.scan_box.setChecked(engine.scan_enabled)
         self.push_box = Switch("Уведомления на телефон (ntfy, порт 8087)")
         self.push_box.setChecked(engine.push_status()[0])
+        self.notify_box = Switch("Информационные уведомления (новые версии у узлов)")
+        self.notify_box.setChecked(engine.notify_update)
+        self.test_btn = QPushButton("Тест уведомления — как увидят другие")
+        self.test_btn.clicked.connect(self._test_notification)
         fl = QVBoxLayout(feat)
         fl.addWidget(self.rdp_box)
         fl.addWidget(self.shadow_box)
         fl.addWidget(self.shadow_btn)
         fl.addWidget(self.scan_box)
         fl.addWidget(self.push_box)
+        fl.addWidget(self.notify_box)
+        fl.addWidget(self.test_btn)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self._apply)
@@ -88,6 +99,27 @@ class SettingsDialog(QDialog):
         layout.addWidget(net)
         layout.addWidget(feat)
         layout.addWidget(buttons)
+
+    def _test_notification(self):
+        """Показать, как выглядит уведомление о новой версии у других."""
+        from .. import __version__
+        from ..core.engine import DEFAULT_UPDATE_URL
+
+        engine = self.engine
+        url = self.url_edit.text().strip() or DEFAULT_UPDATE_URL
+        text = self.text_edit.text().strip()
+        try:
+            text = text.format(name=engine.name, ver=__version__,
+                               my="0.0.0", url=url)
+        except (KeyError, IndexError):
+            QMessageBox.warning(self, "Тест уведомления",
+                                "В шаблоне ошибка. Доступны: {name} {ver} {my} {url}")
+            return
+        engine.add_notification(f"Новая версия {__version__} (тест)", text,
+                                link=url, kind="update")
+        QMessageBox.information(self, "Тест уведомления",
+                                "Отправлено в центр уведомлений — "
+                                "смотрите колокольчик 🔔 справа вверху.")
 
     def _enable_shadow(self):
         if enable_shadow_policy():
@@ -113,13 +145,16 @@ class SettingsDialog(QDialog):
         engine.set_feature("shadow_rdp", self.shadow_box.isChecked())
         engine.set_feature("scan_enabled", self.scan_box.isChecked())
         engine.set_push(self.push_box.isChecked())
+        engine.set_notify_update(self.notify_box.isChecked())
+        url = self.url_edit.text().strip()
+        if url and url != engine.update_url:
+            engine.set_update_url(url)
+        text = self.text_edit.text().strip()
+        if text and text != engine.update_text:
+            engine.set_update_text(text)
 
         theme_name = "dark" if self.theme_box.isChecked() else "light"
         theme.apply(QApplication.instance(), theme_name)
         engine.set_theme(theme_name)
-        url = self.url_edit.text().strip()
-        if url and url != engine.update_url:
-            engine.update_url = url
-            engine.save_settings()
 
         self.accept()
