@@ -176,7 +176,9 @@ class TunnelManager:
             return
         pc = self.cm.get_or_dial(key, state["ip"], state["node_port"])
         if not pc:
-            self._emit_error(key, "нет соединения с узлом")
+            self._emit_error(key, f"не удалось подключиться к {state['ip']}:{state['node_port']} — "
+                                  f"компьютер выключен, приложение не запущено "
+                                  f"или сеть недоступна")
             sock.close()
             return
         sid = protocol.new_id()

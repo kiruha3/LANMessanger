@@ -196,6 +196,12 @@ class ChatPanel(QWidget):
         node = self._node()
         if not node:
             return
+        if not node.online:
+            QMessageBox.warning(
+                self, "RDP",
+                f"{node.name} сейчас не в сети — компьютер выключен "
+                f"или приложение там не запущено.")
+            return
         active_port = self.engine.tunnel.rdp_port(self.key)
         if active_port:
             self.engine.tunnel.close_rdp(self.key)
@@ -204,6 +210,10 @@ class ChatPanel(QWidget):
         ok, info, session_id = self.engine.tunnel.open_rdp(
             self.key, node.ip, node.tcp_port, shadow=self.engine.shadow_rdp)
         if not ok:
+            if "нет соединения" in str(info):
+                info = (f"не удалось подключиться к {node.ip}:{node.tcp_port} — "
+                        f"компьютер выключен, приложение не запущено "
+                        f"или сеть недоступна")
             QMessageBox.warning(self, "RDP", f"Не удалось открыть туннель: {info}")
             return
         self._refresh(force=True)
