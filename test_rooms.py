@@ -8,23 +8,30 @@ import os
 import time
 
 from app.core.engine import Engine
+from app.core.history import History
 
 for f in ("settings.json", "history.db"):
     try:
         os.remove(f)
     except OSError:
         pass
+os.makedirs("test_tmp_rooms", exist_ok=True)
+
+
+def make_engine(name, udp, tcp, targets, hist_name):
+    e = Engine(name, udp_port=udp, tcp_port=tcp, targets=targets)
+    e.history = History(f"test_tmp_rooms/{hist_name}")
+    return e
+
 
 HUB_KEY = "127.0.0.1:46711"
 ROOM = "test"
 CHAT_KEY = f"room:{HUB_KEY}/{ROOM}"
 
-h = Engine("Hub", udp_port=46701, tcp_port=46711,
-           targets=[("127.0.0.1", 46702), ("127.0.0.1", 46703)])
-a = Engine("Alice", udp_port=46702, tcp_port=46712,
-           targets=[("127.0.0.1", 46701)])
-b = Engine("Bob", udp_port=46703, tcp_port=46713,
-           targets=[("127.0.0.1", 46701)])
+h = make_engine("Hub", 46701, 46711,
+                [("127.0.0.1", 46702), ("127.0.0.1", 46703)], "h.db")
+a = make_engine("Alice", 46702, 46712, [("127.0.0.1", 46701)], "a.db")
+b = make_engine("Bob", 46703, 46713, [("127.0.0.1", 46701)], "b.db")
 h.start()
 a.start()
 b.start()
@@ -98,8 +105,7 @@ try:
 
     # --- персистентность: перезапуск A, комната восстанавливается ---
     a.stop()
-    a2 = Engine("Alice", udp_port=46702, tcp_port=46712,
-                targets=[("127.0.0.1", 46701)])
+    a2 = make_engine("Alice", 46702, 46712, [("127.0.0.1", 46701)], "a.db")
     a2.start()
     wait_for(
         lambda: "Alice" in (members_of(a2, HUB_KEY, ROOM, 0.1) or ()),

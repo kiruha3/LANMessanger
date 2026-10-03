@@ -80,9 +80,13 @@ class TunnelManager:
                  remote_port: int = 3389, shadow: bool = False) -> tuple:
         """(ok, local_port:str, session_id:int|None).
         shadow=True — заранее запрашиваем активную сессию удалённого ПК
-        для теневого подключения (mstsc /shadow)."""
+        для теневого подключения (mstsc /shadow).
+        Одновременно активен ОДИН туннель: новый закрывает старый,
+        чтобы по ошибке не попасть не на тот компьютер."""
         if key in self.tunnels:
             return True, str(self.tunnels[key]["port"]), None
+        for old_key in list(self.tunnels):
+            self.close_rdp(old_key)
         pc = self.cm.get_or_dial(key, ip, port)
         if not pc:
             return False, "нет соединения с узлом", None

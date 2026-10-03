@@ -662,7 +662,13 @@ class Engine:
                     self.on_rooms_changed()
             return
         if ptype == "hub_msg":
-            if self.hub_enabled and pc.key in self.rooms.get(room, set()):
+            # сначала решаем, кто мы для этого пакета:
+            # клиент хаба (доставить себе) или хаб (релей участникам)
+            client_entry = self._my_room(pc.key, room)
+            if client_entry is not None and pc.key != self._own_hub_key():
+                # мы клиент: входящее сообщение от хаба этой комнаты
+                self._deliver_room_msg(pc.key, pkt)
+            elif self.hub_enabled and pc.key in self.rooms.get(room, set()):
                 # мы хаб: релей остальным + локальная копия у себя
                 fields = {"room": room, "id": pkt.get("id"),
                           "from": pkt.get("from"), "text": pkt.get("text"),
@@ -678,9 +684,6 @@ class Engine:
                     pc.send_packet("hub_error", code="not_in_room", room=room)
                 except OSError:
                     pass
-            else:
-                # мы клиент: входящее сообщение комнаты от хаба
-                self._deliver_room_msg(pc.key, pkt)
             return
         if ptype == "hub_error":
             # хаб сказал, что нас нет в комнате — перезаходим
