@@ -149,7 +149,7 @@ class CalendarWindow(QWidget):
         btns.addWidget(self.del_btn)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("События выбранного дня:"))
+        right.addWidget(QLabel("Все события (по датам):"))
         right.addWidget(self.events_list, 1)
         right.addLayout(btns)
 
@@ -162,34 +162,54 @@ class CalendarWindow(QWidget):
         self._timer.start(1500)
         self._refresh(force=True)
 
-    def _day_range(self) -> tuple[int, int]:
-        d: QDate = self.calendar.selectedDate()
-        start = d.startOfDay().toSecsSinceEpoch()
-        return start, start + 86400
-
-    def _events_for_day(self) -> list[dict]:
-        start, end = self._day_range()
-        evs = [e for e in self.engine.visible_events()
-               if start <= e["ts"] < end]
-        return sorted(evs, key=lambda e: e["ts"])
-
     def _refresh(self, force: bool = False):
-        evs = self._events_for_day()
+        evs = sorted(self.engine.visible_events(), key=lambda e: e["ts"])
         sig = (tuple(e["id"] for e in evs),
                tuple(e["updated_at"] for e in evs),
                self.calendar.selectedDate().toJulianDay())
         if not force and sig == self._sig:
             return
         self._sig = sig
+
+        bar = self.events_list.verticalScrollBar()
+        scroll_pos = bar.value()
+        sel_id = self._selected_id()
+
         self.events_list.clear()
+        today_jd = self.calendar.selectedDate().toJulianDay()
+        target_item = None
+        cur_day = None
         for ev in evs:
-            when = time.strftime("%H:%M", time.localtime(ev["ts"]))
+            day = time.localtime(ev["ts"])
+            day_jd = QDate(day.tm_year, day.tm_mon, day.tm_mday).toJulianDay()
+            if day_jd != cur_day:
+                cur_day = day_jd
+                label = time.strftime("%d.%m.%Y", day)
+                if day_jd == QDate.currentDate().toJulianDay():
+                    label += "  —  сегодня"
+                sep = QListWidgetItem(label)
+                sep.setFlags(Qt.ItemFlag.NoItemFlags)
+                sep.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                sep.setForeground(QColor(theme.ACCENT))
+                self.events_list.addItem(sep)
+                if day_jd == today_jd:
+                    target_item = sep
+
+            when = time.strftime("%H:%M", day)
             scope = "все" if "all" in (ev.get("participants") or []) \
                 else ", ".join(ev.get("participants") or []) or "личное"
-            text = f"{when} — {ev['title']}  ({ev['creator']}; {scope})"
-            item = QListWidgetItem(text)
+            item = QListWidgetItem(
+                f"{when} — {ev['title']}  ({ev['creator']}; {scope})")
             item.setData(Qt.ItemDataRole.UserRole, ev["id"])
+            if ev["id"] == sel_id:
+                self.events_list.setCurrentItem(item)
             self.events_list.addItem(item)
+
+        if target_item is not None:
+            self.events_list.scrollToItem(
+                target_item, QListWidget.ScrollHint.PositionAtTop)
+        else:
+            bar.setValue(scroll_pos)
 
     def _selected_id(self) -> str | None:
         item = self.events_list.currentItem()
