@@ -96,6 +96,12 @@ class MainWindow(QMainWindow):
         self.scan_btn.setVisible(engine.scan_enabled)
         self.settings_btn = QPushButton("Настройки…")
         self.settings_btn.clicked.connect(self._open_settings)
+        self.exit_btn = QPushButton("Выход")
+        self.exit_btn.setToolTip("Завершить процесс полностью (не сворачивать в трей)")
+        self.exit_btn.clicked.connect(self._exit_clicked)
+        bottom_row = QHBoxLayout()
+        bottom_row.addWidget(self.settings_btn, 1)
+        bottom_row.addWidget(self.exit_btn, 1)
 
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("Моё имя:"))
@@ -105,7 +111,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.sort_btn)
         left_layout.addWidget(self.node_list, 1)
         left_layout.addWidget(self.scan_btn)
-        left_layout.addWidget(self.settings_btn)
+        left_layout.addLayout(bottom_row)
         left = QWidget()
         left.setLayout(left_layout)
 
@@ -158,6 +164,16 @@ class MainWindow(QMainWindow):
     def _quit(self):
         self._quitting = True
         QApplication.quit()
+
+    def _exit_clicked(self):
+        answer = QMessageBox.question(
+            self, "Выход",
+            "Завершить LAN Messenger полностью?\n"
+            "Сообщения и туннели перестанут приниматься.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._quit()
 
     # --- события ---
 
