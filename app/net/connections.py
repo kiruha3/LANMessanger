@@ -10,6 +10,7 @@ import collections
 import ipaddress
 import socket
 import threading
+import time
 import uuid
 
 from . import protocol
@@ -27,6 +28,7 @@ class PeerConn:
         self.alive = True
         self.outbound = False    # мы инициировали это соединение
         self.peer_node = None    # node_id пира из его hello
+        self.last_pong = None    # время последнего pong (None = пир старый/не отвечал)
 
     def send_frame(self, data: bytes):
         with self.lock:
@@ -96,19 +98,28 @@ class ConnectionManager:
         return bool(pc and pc.alive)
 
     def _keepalive_loop(self):
-        """Ping каждые 25 сек по внешним IP, чтобы NAT не рвал простаивающий
-        канал. Локальные соединения не трогаем — там и без пингов работает."""
+        """Ping каждые 25 сек по внешним IP: держит NAT-маппинг.
+        Если пир отвечает pong (новая версия), но pong пропал > 90 сек —
+        канал зомби (NAT выбросил маппинг молча): закрываем, watchdog
+        пересоздаст. Пиры без pong (старые версии) не выкидываем."""
         while not self._stop.wait(25):
-            with self._lock:
-                conns = list(self.conns.values())
-            for pc in conns:
-                ip = pc.key.rsplit(":", 1)[0]
-                if is_private_ip(ip):
-                    continue
-                try:
-                    pc.send_packet("ping")
-                except OSError:
-                    pass
+            self._reap_and_ping()
+
+    def _reap_and_ping(self):
+        with self._lock:
+            conns = list(self.conns.values())
+        now = time.time()
+        for pc in conns:
+            ip = pc.key.rsplit(":", 1)[0]
+            if is_private_ip(ip):
+                continue
+            if pc.last_pong is not None and now - pc.last_pong > 90:
+                pc.close()
+                continue
+            try:
+                pc.send_packet("ping")
+            except OSError:
+                pass
 
     def stop(self):
         self._stop.set()
@@ -324,7 +335,12 @@ class ConnectionManager:
             if self.on_events:
                 self.on_events(pkt, pc)
         elif pkt["type"] == "ping":
-            pass  # keepalive
+            try:
+                pc.send_packet("pong")
+            except OSError:
+                pass
+        elif pkt["type"] == "pong":
+            pc.last_pong = time.time()
 
     def get_or_dial(self, key: str, ip: str, port: int) -> PeerConn | None:
         """Живое соединение с узлом: существующее или новое."""
