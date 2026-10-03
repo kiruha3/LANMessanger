@@ -266,6 +266,8 @@ class Engine:
         """Канал к узлу поднимается сам, как только он обнаружен:
         достучаться сможет хотя бы одна из сторон."""
         self._check_peer_version(node)
+        if self._is_own_key(node.key):
+            return  # сам себе хаб не нужен
         if not node.online or self.connections.is_connected(node.key):
             return
         now = protocol.now()
@@ -318,6 +320,8 @@ class Engine:
         Кто может достучаться — тот и подключается, ждать сообщения не нужно."""
         while True:
             for node in self.discovery.registry.snapshot():
+                if self._is_own_key(node.key):
+                    continue  # не дозваниваемся до самих себя
                 if self.connections.is_connected(node.key):
                     continue
                 now = protocol.now()
@@ -476,6 +480,9 @@ class Engine:
     def _own_hub_key(self) -> str:
         """Ключ своих комнат у себя (канала к самому себе нет)."""
         return f"127.0.0.1:{self.tcp_port}"
+
+    def _is_own_key(self, key: str) -> bool:
+        return key == self._own_hub_key()
 
     def join_room(self, hub_key: str, room: str) -> bool:
         ip, _, port = hub_key.rpartition(":")
@@ -717,9 +724,20 @@ class Engine:
             self._room_remove(room, pc.key)
 
     def _on_peer_disconnected(self, key: str):
-        """Обрыв канала: участник пропадает из всех комнат."""
+        """Обрыв канала: участник пропадает из всех комнат (мы как хаб),
+        а как клиент — немедленно переподключаемся (не ждём watchdog)."""
         for room in list(self.rooms):
             self._room_remove(room, key)
+        if self._wd_stop.is_set():
+            return  # сами останавливаемся — не переподключаемся
+        self._dial_attempts.pop(key, None)  # сброс троттла — дозвон сразу
+        ip, _, port = key.rpartition(":")
+
+        def _redial():
+            time.sleep(1.0)
+            if not self._wd_stop.is_set():
+                self.connections.get_or_dial(key, ip, int(port))
+        threading.Thread(target=_redial, daemon=True).start()
 
     def _rejoin_loop(self, hub_key: str, room: str):
         """Пере-join сохранённой комнаты: ретраи каждые 15 сек до успеха."""
