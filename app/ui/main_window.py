@@ -2,7 +2,7 @@ import ipaddress
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QSize, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, QSize, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -38,6 +38,29 @@ def make_icon(color: str = "#1a7f37") -> QIcon:
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawEllipse(4, 4, 24, 24)
     painter.end()
+    return QIcon(pm)
+
+
+def make_bell_icon(count: int = 0, size: int = 28) -> QIcon:
+    """Колокольчик, нарисованный кодом (на Win10 нет эмодзи 🔔)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    s = size / 32.0
+    p.setBrush(QColor("#3390ec" if count else "#8a8a8a"))
+    p.drawPie(int(6 * s), int(5 * s), int(20 * s), int(20 * s), 0, 180 * 16)
+    p.drawRect(int(6 * s), int(15 * s), int(20 * s), int(8 * s))
+    p.drawRect(int(4 * s), int(23 * s), int(24 * s), int(3 * s))
+    p.drawEllipse(int(13 * s), int(26 * s), int(6 * s), int(5 * s))
+    if count:
+        p.setBrush(QColor("#d32f2f"))
+        p.drawEllipse(int(17 * s), 0, int(15 * s), int(15 * s))
+        p.setPen(QColor("#ffffff"))
+        p.drawText(QRectF(int(17 * s), 0, int(15 * s), int(15 * s)),
+                   Qt.AlignmentFlag.AlignCenter, str(min(count, 99)))
+    p.end()
     return QIcon(pm)
 
 
@@ -137,8 +160,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
 
         # колокольчик уведомлений в правом верхнем углу вкладок
-        self.notif_btn = QPushButton("🔔")
+        self.notif_btn = QPushButton()
         self.notif_btn.setFixedWidth(46)
+        self.notif_btn.setIcon(make_bell_icon(0))
         self.notif_btn.setToolTip("Уведомления")
         self.notif_btn.clicked.connect(self._toggle_notif_panel)
         self.tabs.setCornerWidget(self.notif_btn, Qt.Corner.TopRightCorner)
@@ -198,7 +222,8 @@ class MainWindow(QMainWindow):
 
     def _update_notif_badge(self):
         count = self.engine.unread_notifications()
-        self.notif_btn.setText(f"🔔 {count}" if count else "🔔")
+        self.notif_btn.setIcon(make_bell_icon(count))
+        self.notif_btn.setIconSize(QSize(28, 28))
 
     def _toggle_notif_panel(self):
         if self._notif_panel and self._notif_panel.isVisible():
@@ -232,7 +257,7 @@ class MainWindow(QMainWindow):
         notes = list(reversed(self.engine.notifications[-50:]))
         for n in notes:
             when = time.strftime("%d.%m %H:%M", time.localtime(n["ts"]))
-            link_mark = "  🔗" if n.get("link") else ""
+            link_mark = "  [ссылка]" if n.get("link") else ""
             item = QListWidgetItem(
                 f"{when}  {n['title']}\n{n['text']}{link_mark}")
             item.setData(Qt.ItemDataRole.UserRole, n)
