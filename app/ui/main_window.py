@@ -2,7 +2,7 @@ import ipaddress
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -212,6 +212,9 @@ class MainWindow(QMainWindow):
             lay = QVBoxLayout(frame)
             lay.setContentsMargins(4, 4, 4, 4)
             self._notif_list = QListWidget()
+            self._notif_list.setWordWrap(True)
+            self._notif_list.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self._notif_list.itemClicked.connect(self._notif_clicked)
             close_btn = QPushButton("✕")
             close_btn.setFixedWidth(32)
@@ -233,12 +236,17 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(
                 f"{when}  {n['title']}\n{n['text']}{link_mark}")
             item.setData(Qt.ItemDataRole.UserRole, n)
+            item.setSizeHint(QSize(-1, 48))  # две строки: время+заголовок / текст
             self._notif_list.addItem(item)
         if not notes:
             item = QListWidgetItem("Уведомлений нет")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
+            item.setSizeHint(QSize(-1, 32))
             self._notif_list.addItem(item)
 
+        rows = max(1, self._notif_list.count())
+        h = min(420, 44 + rows * 48 + 12)
+        self._notif_panel.setFixedSize(380, max(120, h))
         x = max(0, self.width() - self._notif_panel.width() - 8)
         self._notif_panel.move(x, self.tabs.pos().y() + 36)
         self._notif_panel.show()
