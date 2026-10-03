@@ -3,6 +3,8 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QGroupBox,
+    QMessageBox,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -10,6 +12,20 @@ from PyQt6.QtWidgets import (
 from ..core import autostart
 from . import theme
 from .switch import Switch
+
+TS_KEY = r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+
+
+def enable_shadow_policy() -> bool:
+    """Shadow=2 (теневое подключение с согласием пользователя).
+    Запуск через runas — Windows покажет UAC."""
+    import ctypes
+
+    rc = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", "reg",
+        f'add "{TS_KEY}" /v Shadow /t REG_DWORD /d 2 /f',
+        None, 0)
+    return rc > 32
 
 
 class SettingsDialog(QDialog):
@@ -44,6 +60,11 @@ class SettingsDialog(QDialog):
         self.rdp_box.setChecked(engine.rdp_enabled)
         self.shadow_box = Switch("RDP: совместный сеанс (не выкидывать пользователя)")
         self.shadow_box.setChecked(engine.shadow_rdp)
+        self.shadow_btn = QPushButton("Разрешить совместное подключение на этом ПК…")
+        self.shadow_btn.setToolTip(
+            "Разовая настройка: параметр Shadow=2 в реестре.\n"
+            "Понадобится подтверждение UAC (права администратора).")
+        self.shadow_btn.clicked.connect(self._enable_shadow)
         self.scan_box = Switch("Сканер сети (кнопка «Обновить скан сети»)")
         self.scan_box.setChecked(engine.scan_enabled)
         self.push_box = Switch("Уведомления на телефон (ntfy, порт 8087)")
@@ -51,6 +72,7 @@ class SettingsDialog(QDialog):
         fl = QVBoxLayout(feat)
         fl.addWidget(self.rdp_box)
         fl.addWidget(self.shadow_box)
+        fl.addWidget(self.shadow_btn)
         fl.addWidget(self.scan_box)
         fl.addWidget(self.push_box)
 
@@ -62,6 +84,18 @@ class SettingsDialog(QDialog):
         layout.addWidget(net)
         layout.addWidget(feat)
         layout.addWidget(buttons)
+
+    def _enable_shadow(self):
+        if enable_shadow_policy():
+            QMessageBox.information(
+                self, "Совместное подключение",
+                "Команда отправлена. Если подтвердили UAC — "
+                "теневое подключение к этому ПК разрешено.")
+        else:
+            QMessageBox.warning(
+                self, "Совместное подключение",
+                "Не удалось выполнить (отменён UAC?). Можно вручную:\n"
+                f"reg add \"{TS_KEY}\" /v Shadow /t REG_DWORD /d 2 /f")
 
     def _apply(self):
         engine = self.engine
