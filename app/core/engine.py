@@ -17,7 +17,8 @@ from .tunnel import TunnelManager
 SETTINGS_FILE = os.path.join(base_dir(), "settings.json")
 DEFAULT_UDP_PORT = UDP_PORT
 DEFAULT_TCP_PORT = TCP_PORT
-DEFAULT_UPDATE_URL = "https://github.com/kiruha3/LANMessanger/releases/latest"
+DEFAULT_UPDATE_URL = ("https://github.com/kiruha3/LANMessanger/"
+                      "releases/latest/download/LANMessenger.exe")
 DEFAULT_UPDATE_TEXT = ("У {name} новая версия {ver} (у вас {my}). "
                        "Скачать: {url}")
 
@@ -478,6 +479,11 @@ class Engine:
 
     def join_room(self, hub_key: str, room: str) -> bool:
         ip, _, port = hub_key.rpartition(":")
+        node = self.node_by_key(hub_key)
+        if node is None:
+            # узел-хаб должен быть в списке, иначе комнаты станут «сиротами»
+            node = self.discovery.registry.add_placeholder(
+                ip, int(port), name=ip)
         pc = self.connections.get_or_dial(hub_key, ip, int(port))
         if not (pc and pc.alive):
             return False
@@ -486,10 +492,9 @@ class Engine:
         except OSError:
             return False
         if not self._my_room(hub_key, room):
-            node = self.node_by_key(hub_key)
             self.my_rooms.append({
                 "hub_key": hub_key,
-                "hub_name": node.name if node else ip,
+                "hub_name": node.name,
                 "room": room, "members": [],
             })
         self.save_settings()
@@ -554,10 +559,15 @@ class Engine:
         return None
 
     def _ensure_hub_room(self, room: str) -> dict:
-        """Хаб сам участник своих комнат: запись в my_rooms."""
-        entry = self._my_room(self._own_hub_key(), room)
+        """Хаб сам участник своих комнат: запись в my_rooms + узел своего ПК."""
+        own = self._own_hub_key()
+        ip, _, port = own.rpartition(":")
+        if self.node_by_key(own) is None:
+            self.discovery.registry.add_placeholder(
+                ip, int(port), name=f"{self.name} (этот ПК)")
+        entry = self._my_room(own, room)
         if not entry:
-            entry = {"hub_key": self._own_hub_key(), "hub_name": self.name,
+            entry = {"hub_key": own, "hub_name": self.name,
                      "room": room, "members": []}
             self.my_rooms.append(entry)
         return entry
@@ -856,7 +866,12 @@ class Engine:
         self.sort_mode = str(data.get("sort_mode", "status"))
         self.hub_enabled = bool(data.get("hub_enabled", True))
         self._saved_rooms = [[str(k), str(r)] for k, r in data.get("rooms", [])]
-        self.update_url = str(data.get("update_url") or DEFAULT_UPDATE_URL)
+        saved_url = str(data.get("update_url") or "")
+        # миграция со старых дефолтов (страница релизов) на прямую ссылку
+        if saved_url.startswith("https://github.com/kiruha3/LANMessanger/releases"):
+            self.update_url = DEFAULT_UPDATE_URL
+        else:
+            self.update_url = saved_url or DEFAULT_UPDATE_URL
         self.update_text = str(data.get("update_text") or DEFAULT_UPDATE_TEXT)
         self.notify_update = bool(data.get("notify_update", True))
         self.discovery.update_url = self.update_url
