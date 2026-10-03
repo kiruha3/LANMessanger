@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QGroupBox,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,

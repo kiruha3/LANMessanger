@@ -335,6 +335,13 @@ class ConnectionManager:
         return self._dial(ip, port, key)
 
     def _handle_msg(self, pkt: dict, ip: str, conn_or_pc):
+        # сначала обработчик (запись в БД/память), потом ACK:
+        # сбой записи -> нет ACK -> отправитель видит честный сбой
+        if self.on_message:
+            try:
+                self.on_message(pkt, ip)
+            except Exception:
+                return
         ack = protocol.encode_frame(protocol.make_ack(self.name, pkt["id"]))
         try:
             if isinstance(conn_or_pc, PeerConn):
@@ -343,5 +350,3 @@ class ConnectionManager:
                 conn_or_pc.sendall(ack)
         except OSError:
             pass
-        if self.on_message:
-            self.on_message(pkt, ip)
