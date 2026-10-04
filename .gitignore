@@ -8,3 +8,4 @@ hub.crt
 hub.key
 СЕРВЕР.md
 test_tmp_rooms/
+.server_creds

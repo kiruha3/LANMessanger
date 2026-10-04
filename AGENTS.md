@@ -1,6 +1,6 @@
 # AGENTS.md — LAN Messenger
 
-P2P-мессенджер для LAN и прямых подключений через интернет + комнаты через хаб + RDP-туннель. Python 3.11 + PyQt6, portable exe через PyInstaller (~41 МБ). Репозиторий: github.com/kiruha3/LANMessanger. Продовый хаб: 194.226.124.123 (systemd-сервис `lanmessenger`, см. `СЕРВЕР.md` и `ХАБ_инструкция.md`).
+P2P-мессенджер для LAN и прямых подключений через интернет + комнаты через хаб + RDP-туннель. Python 3.11 + PyQt6, portable exe через PyInstaller (~41 МБ). Репозиторий: github.com/kiruha3/LANMessanger. Продовый хаб: 194.226.124.123 (systemd-сервис `lanmessenger`, см. `СЕРВЕР.md` и `ХАБ_инструкция.md`). Доступ к серверу (логин/пароль/hostkey) — в локальном файле `.server_creds` (в .gitignore, не коммитить).
 
 ## Правила работы
 
