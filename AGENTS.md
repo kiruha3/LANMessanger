@@ -1,25 +1,26 @@
 # AGENTS.md — LAN Messenger
 
-P2P-мессенджер для LAN и прямых подключений через интернет. Python 3.11 + PyQt6, portable exe через PyInstaller.
+P2P-мессенджер для LAN и прямых подключений через интернет + комнаты через хаб + RDP-туннель. Python 3.11 + PyQt6, portable exe через PyInstaller (~41 МБ). Репозиторий: github.com/kiruha3/LANMessanger. Продовый хаб: 194.226.124.123 (systemd-сервис `lanmessenger`, см. `СЕРВЕР.md` и `ХАБ_инструкция.md`).
 
 ## Правила работы
 
 - **Пуш — только по явной команде пользователя.** Коммитить можно, `git push` — нет.
 - **Каждое изменение фичи или поведения — обновлять CHANGELOG.md и документацию в том же коммите.** CHANGELOG: новая версия/пункт по шаблону «что изменилось для пользователя». Документация: затронутые места в README.md, `ХАБ_инструкция.md`, `СЕРВЕР.md` и вкладке «Помощь» (app/ui/help_tab.py) приводим в соответствие с тем, что реально делает код.
 - **При каждой сборке exe поднимать версию** в `app/__init__.py` (`__version__`) — версия видна в заголовке окна.
-- **Перед сборкой прогонять тесты**: `demo_two_nodes.py`, `test_persistent.py`, `test_ui_smoke.py` (все должны быть зелёными).
-- Сборка: `python -m PyInstaller --noconfirm --onefile --windowed --name LANMessenger main.py` → `dist\LANMessenger.exe`. Перед сборкой убивать запущенный exe (`taskkill //F //IM LANMessenger.exe`), иначе файл занят.
-- После сборки запускать exe и проверять, что процесс жив.
-- Убирать за тестами: `history.db`, `settings.json`, `messenger.pid` в корне — это рабочие данные, в git не идут (есть в `.gitignore`).
+- **Перед сборкой прогонять ВЕСЬ набор**: `demo_two_nodes.py`, `test_persistent.py`, `test_rooms.py`, `test_crypto.py`, `test_tls.py`, `test_ui_smoke.py` — все зелёные.
+- Сборка: `python -m PyInstaller --noconfirm --onefile --windowed --name LANMessenger main.py` → `dist\LANMessenger.exe`. Перед сборкой убивать запущенный exe (`taskkill //F //IM LANMessenger.exe`), иначе файл занят. После сборки запускать и проверять, что процесс жив.
+- Убирать за тестами: `history.db`, `settings.json`, `messenger.pid`, `hub.crt`, `hub.key`, `images/`, `test_tmp_rooms/` в корне — рабочие данные, в git не идут (в `.gitignore`).
 - Коммит: `git -c user.name="kirill" -c user.email="kirill@localhost" commit`.
 
 ## Архитектура (кратко)
 
-- Один exe = один процесс = сеть + UI. Порты: UDP 45677 (discovery), TCP 45678 (сообщения/канал/туннели), 8087 (ntfy push, выкл по умолчанию).
-- `app/net/` — протокол (JSON-кадры `LANMSG/1`, фрейминг 4 байта длины + payload), discovery, постоянные соединения, сканер, crypto (PSK-комнаты: AES-256-GCM, ключ из пароля через PBKDF2, соль = имя комнаты; `enc: true` в hub_msg, хаб релеит не читая).
-- `app/core/` — engine (ядро), history (SQLite), tunnel (RDP-проброс), push (ntfy SSE).
-- `app/ui/` — главное окно (вкладки Чаты/Календарь), пузыри чата (QPainter), темы, свитчи, настройки.
-- Входящие TCP — только приватные IP + явно разрешённые; есть режим accept_all.
+- Один exe = один процесс = сеть + UI. Порты: UDP 45677 (discovery), TCP 45678 (сообщения/каналы/комнаты/туннели), 8087 (ntfy push, выкл по умолчанию).
+- `app/net/` — protocol (JSON-кадры `LANMSG/1`, фрейминг 4 байта длины + payload), discovery (UDP announce, реестр, дедуп по node_id), connections (постоянные каналы, hello, tie-break, ping/pong, TLS peek-детект + пиннинг отпечатков), scanner (ping/ARP/hostname), crypto (AES-256-GCM PSK: комнаты и сетевой пароль; self-signed TLS).
+- `app/core/` — engine (ядро: чаты, комнаты, календарь, уведомления, настройки), history (SQLite: messages + events), tunnel (RDP-проброс, один активный, shadow-режим), push (ntfy SSE), autostart (реестр Run).
+- `app/ui/` — main_window (вкладки Чаты/Календарь/Помощь, дерево узлов+комнат, колокольчик, трей), chat_window (пузыри QPainter, Ctrl+V картинки, RDP-кнопка, «Пригласить»), calendar_window, image_viewer (выезжающий просмотрщик), settings_dialog (фичефлаги), help_tab (аккордеон-руководство), theme, switch.
+- Фичефлаги (дефолт 0.18.0): включён только rdp_enabled; сканер, хаб (принимать комнаты), алерты версий, ручной IP, вход в комнаты — выключены по умолчанию. TLS включён (транспорт, не фича).
+- Входящие TCP — только приватные IP + явно разрешённые; есть режим accept_all (на хабе сервера).
+- Обратная совместимость: старые клиенты (0.1.x «соединение на сообщение», plain без TLS) работают с новым движком.
 
 ## Особенности, о которые уже споткнулись
 
@@ -31,13 +32,15 @@ P2P-мессенджер для LAN и прямых подключений че�
 - `Qt.Popup` модально захватывает ввод — приложение виснет, если поверх открывается QMessageBox. Оверлеи делать обычными дочерними виджетами.
 - ACK только после записи сообщения в БД, иначе ложные «доставлено».
 - Несколько движков в тестах в одной папке делят history.db/settings.json — фантомные дубли. В тестах выдавать каждому свой `History(path)`.
+- Таблица events создаётся в `History.__init__` (не в Engine.start) — иначе вкладка календаря падает до старта движка.
 
 ## Хаб и комнаты (правила, выстраданные боем)
 
-- `hub_key` вида `ip:port`; своя комната хаба — `_own_hub_key()` = `127.0.0.1:tcp_port`. **Никогда не дозваниваться до своего ключа** (watchdog/auto_connect/rejoin имеют guard `_is_own_key`) — иначе бесконечная петля самодозвона с REMOVE+JOIN каждые секунды.
+- `hub_key` вида `ip:port`; своя комната хаба — `_own_hub_key()` = `127.0.0.1:tcp_port`. **Никогда не дозваниваться до своего ключа** (watchdog/auto_connect/rejoin имеют guard `_is_own_key`) — иначе бесконечная петля самодозвона с REMOVE+JOIN каждые секунды. Join к своей комнате — локальный.
 - Обрыв канала: хаб выкидывает участника из комнат (`on_disconnect`), клиент обязан перезайти: мгновенный redial (сброс троттла) + rejoin в `_on_peer_connected`. Хаб шлёт `hub_error not_in_room` — клиент перезаходит сам.
 - Ветка `hub_msg`: сначала клиентская доставка (`_my_room(pc.key, room)`), потом хаб-релей, потом `hub_error`. Не менять порядок.
 - Три участника боевого теста: хаб (сервис на сервере), гость `client_b.py` на сервере, клиент с локальной машины. Окончательный критерий — входящее сообщение от другого клиента, а не «join=True».
+- Имена участников комнат — из hello-рукопожатия, не из UDP-реестра (пустого за NAT).
 
 ## Боевой тест хаба — методика (главная ловушка)
 
@@ -45,5 +48,6 @@ P2P-мессенджер для LAN и прямых подключений че�
 - **`nohup cmd > /tmp/x.log 2>&1 &` в plink**: plink ждёт закрытия канала, пока жив фоновый процесс — «B-started» может вернуться через 60–140 сек. Лечение: `setsid nohup cmd < /dev/null > /tmp/x.log 2>&1 &` или принять задержку и делать у гостя большое окно жизни (300 сек).
 - Гость на сервере должен жить ДОЛЬШЕ, чем весь прогон клиента: большинство «не дошло» в боевых тестах — окно гостя истекло до старта клиента.
 - Перед боевым тестом: `pkill -f client_b.py` на сервере — старые гости с тем же ключом вызывают tie-break войны и выкидывают друг друга из комнат.
+- Гости работают из ИЗОЛИРОВАННОЙ папки (`/tmp/bdir`, `/tmp/cdir`): иначе делят settings.json/history.db с хабом (общий пароль комнаты подхватится и «чужой» клиент прочитает секрет легально).
 - Дебаг на сервере: `cp engine.py /tmp/backup` → патч → тест → `git checkout app/core/engine.py && git pull && systemctl restart lanmessenger`. Журнала systemd на этом VPS нет — лог писать в `/tmp/hubdbg.log`.
-- Проверка сервиса: `systemctl is-active lanmessenger`, порт `ss -tlnp | grep 45678`.
+- Проверка сервиса: `systemctl is-active lanmessenger`, порт `ss -tlnp | grep 45678`, обновление — `git pull && systemctl restart lanmessenger` (СЕРВЕР.md).
