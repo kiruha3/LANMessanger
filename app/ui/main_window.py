@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, QRectF, QSize, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,6 +31,7 @@ from ..net import scanner
 from ..net.constants import is_private_ip
 from . import theme
 from .chat_window import ChatPanel
+from .info_panel import InfoPanel
 
 
 def make_icon(color: str = "#1a7f37") -> QIcon:
@@ -51,7 +53,7 @@ def make_bell_icon(count: int = 0, size: int = 28) -> QIcon:
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setPen(Qt.PenStyle.NoPen)
     s = size / 32.0
-    p.setBrush(QColor("#3390ec" if count else "#8a8a8a"))
+    p.setBrush(QColor(theme.ACCENT if count else "#8a8a8a"))
     p.drawPie(int(6 * s), int(5 * s), int(20 * s), int(20 * s), 0, 180 * 16)
     p.drawRect(int(6 * s), int(15 * s), int(20 * s), int(8 * s))
     p.drawRect(int(4 * s), int(23 * s), int(24 * s), int(3 * s))
@@ -92,6 +94,11 @@ class MainWindow(QMainWindow):
         self.name_edit = QLineEdit(engine.name)
         self.name_edit.setPlaceholderText("Моё имя в сети")
         self.name_edit.editingFinished.connect(self._name_changed)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Поиск по имени…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self.refresh)
 
         self.rejected_label = QLabel("")
         self.rejected_label.setStyleSheet("color:#c0392b")
@@ -148,18 +155,19 @@ class MainWindow(QMainWindow):
         self.scan_btn = QPushButton("Обновить скан сети")
         self.scan_btn.clicked.connect(lambda: self.start_scan(force=True))
         self.scan_btn.setVisible(engine.scan_enabled)
-        self.settings_btn = QPushButton("Настройки…")
+        self.settings_btn = QPushButton("Настройки")
+        self.settings_btn.setToolTip("Фичефлаги, тема, пароль сети и др.")
         self.settings_btn.clicked.connect(self._open_settings)
         self.exit_btn = QPushButton("Выход")
         self.exit_btn.setToolTip("Завершить процесс полностью (не сворачивать в трей)")
         self.exit_btn.clicked.connect(self._exit_clicked)
         bottom_row = QHBoxLayout()
-        bottom_row.addWidget(self.settings_btn, 1)
         bottom_row.addWidget(self.exit_btn, 1)
 
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("Моё имя:"))
         left_layout.addWidget(self.name_edit)
+        left_layout.addWidget(self.search_edit)
         left_layout.addLayout(addip_row)
         left_layout.addLayout(room_row)
         left_layout.addLayout(rejected_row)
@@ -169,16 +177,22 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(bottom_row)
         left = QWidget()
         left.setLayout(left_layout)
+        left.setMinimumWidth(180)  # иначе окно не сожмётся до узкого режима
         self._apply_feature_visibility()
 
-        # --- правая панель ---
+        # --- центр: чат; справа: инфо-панель ---
         self.chat_panel = ChatPanel(engine)
+        self.chat_panel.setMinimumWidth(280)
+        self.info_panel = InfoPanel(engine, self.chat_panel)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
         splitter.addWidget(self.chat_panel)
+        splitter.addWidget(self.info_panel)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([300, 560])
+        splitter.setStretchFactor(2, 0)
+        splitter.setCollapsible(2, False)
+        splitter.setSizes([300, 560, 220])
 
         from .calendar_window import CalendarWindow
         from .help_tab import HelpTab
@@ -187,16 +201,53 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(splitter, "Чаты")
         self.tabs.addTab(CalendarWindow(engine), "Календарь")
         self.tabs.addTab(HelpTab(), "Помощь")
-        self.setCentralWidget(self.tabs)
+        self.tabs.tabBar().hide()  # вкладки переключаются кнопками верхней панели
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # колокольчик уведомлений в правом верхнем углу вкладок
+        # колокольчик уведомлений (правый блок верхней панели)
         self.notif_btn = QPushButton()
         self.notif_btn.setFixedWidth(46)
         self.notif_btn.setIcon(make_bell_icon(0))
         self.notif_btn.setToolTip("Уведомления")
         self.notif_btn.clicked.connect(self._toggle_notif_panel)
-        self.tabs.setCornerWidget(self.notif_btn, Qt.Corner.TopRightCorner)
         self._notif_panel = None
+
+        # --- верхняя панель: название | навигация | колокольчик + настройки ---
+        top_bar = QFrame()
+        top_lay = QHBoxLayout(top_bar)
+        top_lay.setContentsMargins(10, 6, 10, 6)
+        title_label = QLabel(f"LAN Messenger {__version__}")
+        title_label.setStyleSheet("font-weight:bold;")
+        top_lay.addWidget(title_label)
+        top_lay.addStretch(1)
+        self._nav_buttons = []
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        for i, label in enumerate(("Чаты", "Календарь", "Помощь")):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.clicked.connect(
+                lambda _checked=False, idx=i: self.tabs.setCurrentIndex(idx))
+            self._nav_group.addButton(btn, i)
+            self._nav_buttons.append(btn)
+            top_lay.addWidget(btn)
+        self._nav_buttons[0].setChecked(True)
+        top_lay.addStretch(1)
+        top_lay.addWidget(self.notif_btn)
+        top_lay.addWidget(self.settings_btn)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFixedHeight(1)
+
+        central = QWidget()
+        central_lay = QVBoxLayout(central)
+        central_lay.setContentsMargins(0, 0, 0, 0)
+        central_lay.setSpacing(0)
+        central_lay.addWidget(top_bar)
+        central_lay.addWidget(separator)
+        central_lay.addWidget(self.tabs, 1)
+        self.setCentralWidget(central)
 
         self._setup_tray()
         self.engine.on_message_event = lambda key, msg: self.message_received.emit(key)
@@ -218,6 +269,16 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     # --- трей ---
+
+    def _on_tab_changed(self, index: int):
+        if 0 <= index < len(self._nav_buttons):
+            self._nav_buttons[index].setChecked(True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # узкое окно: инфо-панель авто-скрывается; состояние зажима
+        # (collapsed) не трогаем — при расширении оно восстановится само
+        self.info_panel.set_auto_hidden(self.width() < 950)
 
     def _apply_feature_visibility(self):
         """Показать/скрыть продвинутые поля по флагам (без перезапуска)."""
@@ -312,7 +373,8 @@ class MainWindow(QMainWindow):
         h = min(420, 44 + rows * 48 + 12)
         self._notif_panel.setFixedSize(380, max(120, h))
         x = max(0, self.width() - self._notif_panel.width() - 8)
-        self._notif_panel.move(x, self.tabs.pos().y() + 36)
+        below = self.notif_btn.mapTo(self, self.notif_btn.rect().bottomLeft())
+        self._notif_panel.move(x, below.y() + 4)
         self._notif_panel.show()
         self._notif_panel.raise_()
         self.engine.mark_notifications_read()
@@ -572,6 +634,8 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         self._refresh_rejected()
+        self.info_panel.refresh()
+        query = self.search_edit.text().strip().lower()
         nodes = self._sorted_nodes(self.engine.nodes())
         rooms = list(getattr(self.engine, "my_rooms", []))
         rooms_by_hub: dict[str, list[dict]] = {}
@@ -601,6 +665,7 @@ class MainWindow(QMainWindow):
                  self.engine.unread_count(self._room_key(r)))
                 for r in rooms)),
             tuple(sorted(scanned.items())),
+            query,
         )
         if signature == getattr(self, "_sig", None):
             return  # ничего не изменилось — не перерисовываем (иначе прыгает)
@@ -616,6 +681,7 @@ class MainWindow(QMainWindow):
 
         self.node_list.clear()
         restore_item = None
+        filter_entries = []  # (item, текст для поиска, родитель или None)
         for node in nodes:
             unread = self.engine.unread_count(node.key)
             badge = f"  [{unread}]" if unread else ""
@@ -625,6 +691,7 @@ class MainWindow(QMainWindow):
             color = QColor(colors["online"] if node.online else colors["offline"])
             top.setForeground(0, color)
             self.node_list.addTopLevelItem(top)
+            filter_entries.append((top, f"{node.name} {node.ip}".lower(), None))
             if node.key == selected:
                 restore_item = top
             node_rooms = rooms_by_hub.get(node.key, [])
@@ -637,6 +704,8 @@ class MainWindow(QMainWindow):
                 child.setData(0, Qt.ItemDataRole.UserRole, rk)
                 child.setForeground(0, color)
                 top.addChild(child)
+                filter_entries.append(
+                    (child, f"{r.get('room', '')} {r.get('hub_key', '')}".lower(), top))
                 if rk == selected:
                     restore_item = child
             if node_rooms:
@@ -651,6 +720,8 @@ class MainWindow(QMainWindow):
             item.setData(0, Qt.ItemDataRole.UserRole, rk)
             item.setForeground(0, QColor(colors["offline"]))
             self.node_list.addTopLevelItem(item)
+            filter_entries.append(
+                (item, f"{r.get('room', '')} {r.get('hub_key', '')}".lower(), None))
             if rk == selected:
                 restore_item = item
 
@@ -661,6 +732,7 @@ class MainWindow(QMainWindow):
             item.setData(0, Qt.ItemDataRole.UserRole, f"host:{ip}")
             item.setForeground(0, QColor(colors["host"]))
             self.node_list.addTopLevelItem(item)
+            filter_entries.append((item, f"{ip} {hostname or ''}".lower(), None))
             if f"host:{ip}" == selected:
                 restore_item = item
 
@@ -668,6 +740,14 @@ class MainWindow(QMainWindow):
             item = QTreeWidgetItem(["Поиск узлов и устройств…"])
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.node_list.addTopLevelItem(item)
+        if query:
+            for it, searchable, parent in filter_entries:
+                it.setHidden(query not in searchable)
+            # родителей совпадений показываем развёрнутыми
+            for it, searchable, parent in filter_entries:
+                if parent is not None and query in searchable:
+                    parent.setHidden(False)
+                    parent.setExpanded(True)
         if restore_item is not None:
             self.node_list.setCurrentItem(restore_item)
         bar.setValue(scroll_pos)
@@ -681,6 +761,7 @@ class MainWindow(QMainWindow):
             self.chat_panel.show_hint(f"{ip} — на устройстве нет мессенджера")
         else:
             self.chat_panel.set_key(data)
+        self.info_panel.refresh()
 
     def _tree_context_menu(self, pos):
         item = self.node_list.itemAt(pos)
@@ -730,6 +811,7 @@ class MainWindow(QMainWindow):
             self._select(item)
             return
         self.chat_panel.set_key(key)
+        self.info_panel.refresh()
 
     def closeEvent(self, event):
         if self._quitting or not self.tray.isVisible():
