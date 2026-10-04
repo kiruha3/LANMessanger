@@ -1,11 +1,11 @@
 # AGENTS.md — LAN Messenger
 
-P2P-мессенджер для LAN и прямых подключений через интернет + комнаты через хаб + RDP-туннель. Python 3.11 + PyQt6, portable exe через PyInstaller (~41 МБ). Репозиторий: github.com/kiruha3/LANMessanger. Продовый хаб: 194.226.124.123 (systemd-сервис `lanmessenger`, см. `СЕРВЕР.md` и `ХАБ_инструкция.md`). Доступ к серверу (логин/пароль/hostkey) — в локальном файле `.server_creds` (в .gitignore, не коммитить).
+P2P-мессенджер для LAN и прямых подключений через интернет + комнаты через хаб + RDP-туннель. Python 3.11 + PyQt6, portable exe через PyInstaller (~41 МБ). Репозиторий: github.com/kiruha3/LANMessanger. Продовый хаб: 194.226.124.123 (systemd-сервис `lanmessenger`, см. `docs/СЕРВЕР.md` и `docs/ХАБ_инструкция.md`). Доступ к серверу (логин/пароль/hostkey) — в локальном файле `.server_creds` (в .gitignore, не коммитить).
 
 ## Правила работы
 
 - **Пуш — только по явной команде пользователя.** Коммитить можно, `git push` — нет.
-- **Каждое изменение фичи или поведения — обновлять CHANGELOG.md и документацию в том же коммите.** CHANGELOG: новая версия/пункт по шаблону «что изменилось для пользователя». Документация: затронутые места в README.md, `ХАБ_инструкция.md`, `СЕРВЕР.md` и вкладке «Помощь» (app/ui/help_tab.py) приводим в соответствие с тем, что реально делает код.
+- **Каждое изменение фичи или поведения — обновлять CHANGELOG.md и документацию в том же коммите.** CHANGELOG: новая версия/пункт по шаблону «что изменилось для пользователя». Документация: затронутые места в README.md, `docs/ХАБ_инструкция.md`, `docs/СЕРВЕР.md` и вкладке «Помощь» (app/ui/help_tab.py) приводим в соответствие с тем, что реально делает код.
 - **При каждой сборке exe поднимать версию** в `app/__init__.py` (`__version__`) — версия видна в заголовке окна.
 - **Перед сборкой прогонять ВЕСЬ набор**: `demo_two_nodes.py`, `test_persistent.py`, `test_rooms.py`, `test_crypto.py`, `test_tls.py`, `test_ui_smoke.py` — все зелёные.
 - Сборка: `python -m PyInstaller --noconfirm --onefile --windowed --name LANMessenger main.py` → `dist\LANMessenger.exe`. Перед сборкой убивать запущенный exe (`taskkill //F //IM LANMessenger.exe`), иначе файл занят. После сборки запускать и проверять, что процесс жив.
@@ -50,4 +50,4 @@ P2P-мессенджер для LAN и прямых подключений че�
 - Перед боевым тестом: `pkill -f client_b.py` на сервере — старые гости с тем же ключом вызывают tie-break войны и выкидывают друг друга из комнат.
 - Гости работают из ИЗОЛИРОВАННОЙ папки (`/tmp/bdir`, `/tmp/cdir`): иначе делят settings.json/history.db с хабом (общий пароль комнаты подхватится и «чужой» клиент прочитает секрет легально).
 - Дебаг на сервере: `cp engine.py /tmp/backup` → патч → тест → `git checkout app/core/engine.py && git pull && systemctl restart lanmessenger`. Журнала systemd на этом VPS нет — лог писать в `/tmp/hubdbg.log`.
-- Проверка сервиса: `systemctl is-active lanmessenger`, порт `ss -tlnp | grep 45678`, обновление — `git pull && systemctl restart lanmessenger` (СЕРВЕР.md).
+- Проверка сервиса: `systemctl is-active lanmessenger`, порт `ss -tlnp | grep 45678`, обновление — `git pull && systemctl restart lanmessenger` (docs/СЕРВЕР.md).
