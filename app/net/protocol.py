@@ -82,7 +82,7 @@ class FrameDecoder:
 
 
 def make_message(sender: str, text: str, msg_id: str = None, msg_port: int = None,
-                 img: str = None) -> bytes:
+                 img: str = None, enc: bool = False) -> bytes:
     if len(text.encode("utf-8")) > MAX_MESSAGE_LEN:
         raise ProtocolError("message too long")
     fields = {"id": msg_id or new_id(), "from": sender, "timestamp": now(),
@@ -90,7 +90,9 @@ def make_message(sender: str, text: str, msg_id: str = None, msg_port: int = Non
     if msg_port is not None:
         fields["msg_port"] = msg_port
     if img is not None:
-        fields["img"] = img  # base64 PNG
+        fields["img"] = img  # base64 PNG (или шифротекст при enc)
+    if enc:
+        fields["enc"] = True  # text/img — AES-GCM под сетевым PSK
     return make_packet("msg", **fields)
 
 

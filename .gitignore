@@ -4,5 +4,7 @@ dist/
 *.spec
 settings.json
 history.db
+hub.crt
+hub.key
 СЕРВЕР.md
 test_tmp_rooms/

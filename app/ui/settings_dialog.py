@@ -65,6 +65,27 @@ class SettingsDialog(QDialog):
         nl = QVBoxLayout(net)
         nl.addWidget(self.acceptall_box)
 
+        # --- шифрование ---
+        enc = QGroupBox("Шифрование")
+        self.tls_box = Switch("TLS-канал к узлам (рекомендуется)")
+        self.tls_box.setChecked(getattr(engine, "tls_enabled", True))
+        self.psk_edit = QLineEdit(getattr(engine, "network_psk", ""))
+        self.psk_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.psk_edit.setPlaceholderText("Сетевой пароль (PSK для P2P)")
+        el = QVBoxLayout(enc)
+        el.addWidget(self.tls_box)
+        el.addWidget(QLabel("Сетевой пароль (PSK для P2P):"))
+        el.addWidget(self.psk_edit)
+        el.addWidget(QLabel("Одинаковый у всех участников сети."))
+        fps = getattr(engine, "known_fingerprints", None) or {}
+        if fps:
+            fp_text = "\n".join(f"{key}: {fp[:16]}…" for key, fp in fps.items())
+        else:
+            fp_text = "нет"
+        fp_label = QLabel(f"Известные отпечатки:\n{fp_text}")
+        fp_label.setWordWrap(True)
+        el.addWidget(fp_label)
+
         # --- фичефлаги ---
         feat = QGroupBox("Функции")
         self.rdp_box = Switch("RDP-туннель (кнопка в чате + приём туннелей)")
@@ -100,6 +121,7 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(general)
         layout.addWidget(net)
+        layout.addWidget(enc)
         layout.addWidget(feat)
         layout.addWidget(buttons)
 
@@ -160,6 +182,10 @@ class SettingsDialog(QDialog):
             autostart.disable()
 
         engine.set_accept_all(self.acceptall_box.isChecked())
+        if hasattr(engine, "set_tls_enabled"):
+            engine.set_tls_enabled(self.tls_box.isChecked())
+        if hasattr(engine, "set_network_psk"):
+            engine.set_network_psk(self.psk_edit.text().strip())
         engine.set_feature("rdp_enabled", self.rdp_box.isChecked())
         engine.set_feature("shadow_rdp", self.shadow_box.isChecked())
         engine.set_feature("scan_enabled", self.scan_box.isChecked())

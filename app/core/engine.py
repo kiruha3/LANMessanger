@@ -94,7 +94,13 @@ class Engine:
         self.scan_enabled = True
         self.shadow_rdp = False  # RDP: совместный сеанс (shadow) — по умолчанию выкл
         self.sort_mode = "status"  # status | name | ip
+        self.tls_enabled = True    # TLS на TCP-канал (self-signed + пиннинг)
+        self.network_psk = ""      # сетевой пароль: PSK-шифрование личных msg
+        self.known_fingerprints: dict[str, str] = {}  # key -> отпечаток TLS пира
+        self._p2p_key_cache: tuple[str, bytes] | None = None
+        self.connections.on_tls_fingerprint = self._on_tls_fingerprint
         self.load_settings()
+        self._apply_tls()
 
     def _tunnel_error_relay(self, key: str, text: str):
         self.add_notification("RDP-туннель", text)
@@ -397,16 +403,25 @@ class Engine:
 
     def deliver(self, key: str, msg: ChatMessage, ip: str, port: int):
         db_id = msg.id
-        img_b64 = None
+        p2p_key = self._p2p_key()
+        img_payload = None
         if msg.img:
             try:
-                import base64
                 with open(self.img_path(msg.img), "rb") as f:
-                    img_b64 = base64.b64encode(f.read()).decode("ascii")
+                    img_raw = f.read()
             except OSError:
                 msg.status = "failed"
                 return
-        msg_id, ok = self.connections.send(key, ip, port, msg.text, img=img_b64)
+            if p2p_key:
+                img_payload = crypto.encrypt(p2p_key, img_raw)
+            else:
+                import base64
+                img_payload = base64.b64encode(img_raw).decode("ascii")
+        text = msg.text
+        if p2p_key:
+            text = crypto.encrypt(p2p_key, msg.text.encode("utf-8"))
+        msg_id, ok = self.connections.send(key, ip, port, text,
+                                           img=img_payload, enc=bool(p2p_key))
         msg.id = msg_id
         msg.status = "delivered" if ok else "failed"
         if self.history:
@@ -460,12 +475,25 @@ class Engine:
             return
         port = int(pkt.get("msg_port") or TCP_PORT)
         key = f"{ip}:{port}"
+        text = str(pkt.get("text") or "")
         img = None
-        if pkt.get("img"):
+        if crypto.is_encrypted(pkt):
+            # личное сообщение под сетевым паролем (PSK)
+            p2p_key = self._p2p_key()
+            plain = crypto.decrypt(p2p_key, text) if p2p_key else None
+            if plain is None:
+                text = "[не удалось расшифровать — неверный сетевой пароль]"
+            else:
+                text = plain.decode("utf-8", errors="replace")
+                if pkt.get("img"):
+                    img_raw = crypto.decrypt(p2p_key, pkt["img"])
+                    if img_raw is not None:
+                        img = self.save_incoming_img_bytes(msg_id, img_raw)
+        elif pkt.get("img"):
             img = self.save_incoming_img(msg_id, pkt["img"])
         msg = ChatMessage(
             id=msg_id, direction="in",
-            author=str(pkt.get("from") or ip), text=str(pkt.get("text") or ""),
+            author=str(pkt.get("from") or ip), text=text,
             timestamp=int(pkt.get("timestamp") or protocol.now()),
             img=img,
         )
@@ -846,6 +874,54 @@ class Engine:
         self.sort_mode = mode
         self.save_settings()
 
+    # --- TLS на канал и сетевой пароль (PSK для P2P) ---
+
+    def _apply_tls(self):
+        """Проводит tls_enabled в ConnectionManager: сертификат для входящих
+        (генерируется рядом с настройками при первом включении) и флаг
+        TLS-first для исходящих (с откатом на plain)."""
+        if self.tls_enabled:
+            try:
+                crt, key = crypto.ensure_self_signed_cert(base_dir())
+            except Exception:
+                crt = key = None  # нет crypto/прав — приём остаётся plain
+            self.connections.tls_cert = crt
+            self.connections.tls_key = key
+        else:
+            self.connections.tls_cert = None
+            self.connections.tls_key = None
+        self.connections.tls_outbound = self.tls_enabled
+
+    def set_tls_enabled(self, on: bool):
+        self.tls_enabled = bool(on)
+        self._apply_tls()
+        self.save_settings()
+
+    def set_network_psk(self, psk: str):
+        self.network_psk = str(psk or "")
+        self._p2p_key_cache = None
+        self.save_settings()
+
+    def _p2p_key(self) -> bytes | None:
+        """Ключ P2P-шифрования из сетевого пароля (кэш — PBKDF2 небыстрый)."""
+        if not self.network_psk:
+            return None
+        if not self._p2p_key_cache or self._p2p_key_cache[0] != self.network_psk:
+            self._p2p_key_cache = (self.network_psk,
+                                   crypto.room_key(self.network_psk, "lanmsg-p2p"))
+        return self._p2p_key_cache[1]
+
+    def _on_tls_fingerprint(self, key: str, fp: str):
+        """Новый/сменившийся отпечаток пира: запоминаем (known hosts)
+        и показываем уведомление."""
+        if self.known_fingerprints.get(key) == fp:
+            return
+        self.known_fingerprints[key] = fp
+        node = self.node_by_key(key)
+        who = node.name if node else key
+        self.add_notification("Отпечаток TLS", f"{who}: {fp[:16]}...")
+        self.save_settings()
+
     # --- push на телефон (ntfy) ---
 
     def set_push(self, enabled: bool, port: int = 8087, topic: str = "lanalerts"):
@@ -904,6 +980,9 @@ class Engine:
             "shadow_rdp": self.shadow_rdp,
             "sort_mode": self.sort_mode,
             "hub_enabled": self.hub_enabled,
+            "tls_enabled": self.tls_enabled,
+            "network_psk": self.network_psk,
+            "known_fingerprints": self.known_fingerprints,
             "rooms": [[r["hub_key"], r["room"], r.get("password")]
                       for r in self.my_rooms
                       if r["hub_key"] != self._own_hub_key()],
@@ -937,6 +1016,10 @@ class Engine:
         self.shadow_rdp = bool(data.get("shadow_rdp", False))
         self.sort_mode = str(data.get("sort_mode", "status"))
         self.hub_enabled = bool(data.get("hub_enabled", True))
+        self.tls_enabled = bool(data.get("tls_enabled", True))
+        self.network_psk = str(data.get("network_psk", ""))
+        self.known_fingerprints = {str(k): str(v) for k, v in
+                                   (data.get("known_fingerprints") or {}).items()}
         self._saved_rooms = []
         for item in data.get("rooms", []):
             # формат: [hub_key, room] или [hub_key, room, password]

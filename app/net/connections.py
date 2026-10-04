@@ -7,13 +7,15 @@
 """
 
 import collections
+import hashlib
 import ipaddress
 import socket
+import ssl
 import threading
 import time
 import uuid
 
-from . import protocol
+from . import crypto, protocol
 from .constants import MAX_TCP_PAYLOAD, TCP_PORT, is_private_ip
 
 HELLO_TIMEOUT = 5.0
@@ -56,6 +58,11 @@ class ConnectionManager:
         self.on_hub = None     # callback(pkt, PeerConn) для комнат (hub_*)
         self.on_connect = None  # callback(key) — канал поднят (нужен sync)
         self.on_disconnect = None  # callback(key) — канал оборвался
+        self.on_tls_fingerprint = None  # callback(key, fingerprint) — новый/сменившийся
+        self.tls_cert = None     # путь к hub.crt; None — входящие только plain
+        self.tls_key = None      # путь к hub.key
+        self.tls_outbound = False  # исходящие: сначала TLS, при SSLError — plain
+        self.peer_fingerprints: dict[str, str] = {}  # key -> sha256 отпечаток пира
         self.allowed_ips: set[str] = set()
         self.allowed_networks: list[ipaddress.IPv4Network] = []
         self.accept_all = False
@@ -66,6 +73,8 @@ class ConnectionManager:
         self._stop = threading.Event()
         self._sock: socket.socket | None = None
         self._accept_thread: threading.Thread | None = None
+        self._tls_ctx: ssl.SSLContext | None = None
+        self._tls_ctx_for: tuple[str, str] | None = None
         self.node_id = uuid.uuid4().hex
 
     def allow_ip(self, ip: str):
@@ -153,9 +162,50 @@ class ConnectionManager:
                 continue
             threading.Thread(target=self._inbound, args=(conn, addr), daemon=True).start()
 
+    def _server_ctx(self) -> ssl.SSLContext | None:
+        """Кэшированный TLS-контекст сервера под текущие tls_cert/tls_key."""
+        if not self.tls_cert or not self.tls_key:
+            return None
+        pair = (self.tls_cert, self.tls_key)
+        if self._tls_ctx_for != pair:
+            try:
+                self._tls_ctx = crypto.server_ctx(*pair)
+            except (OSError, ssl.SSLError):
+                self._tls_ctx = None
+            self._tls_ctx_for = pair
+        return self._tls_ctx
+
+    def _maybe_wrap_tls(self, conn: socket.socket) -> socket.socket | None:
+        """Входящее: первый байт TLS handshake (0x16) -> оборачиваем в TLS,
+        иначе оставляем plain (старые клиенты). None — соединение закрыто."""
+        if not self.tls_cert:
+            return conn
+        try:
+            first = conn.recv(1, socket.MSG_PEEK)
+        except OSError:
+            conn.close()
+            return None
+        if not first:
+            conn.close()
+            return None
+        if first[0] != 0x16:  # не TLS record handshake — plain-клиент
+            return conn
+        ctx = self._server_ctx()
+        if ctx is None:
+            conn.close()
+            return None
+        try:
+            return ctx.wrap_socket(conn, server_side=True)
+        except (OSError, ssl.SSLError):
+            conn.close()
+            return None
+
     def _inbound(self, conn: socket.socket, addr):
         """Первый фрейм: hello (новый режим) или msg (старый клиент)."""
         conn.settimeout(HELLO_TIMEOUT)
+        conn = self._maybe_wrap_tls(conn)
+        if conn is None:
+            return
         decoder = protocol.FrameDecoder()
         try:
             data = conn.recv(65536)
@@ -204,15 +254,57 @@ class ConnectionManager:
 
     # --- исходящие ---
 
+    def _record_fingerprint(self, key: str, sock: ssl.SSLSocket):
+        """Отпечаток сертификата пира после TLS-рукопожатия (пиннинг)."""
+        try:
+            der = sock.getpeercert(binary_form=True)
+        except (OSError, ValueError):
+            return
+        if not der:
+            return
+        fp = hashlib.sha256(der).hexdigest()
+        old = self.peer_fingerprints.get(key)
+        self.peer_fingerprints[key] = fp
+        if old != fp and self.on_tls_fingerprint:
+            try:
+                self.on_tls_fingerprint(key, fp)
+            except Exception:
+                pass
+
     def _dial(self, ip: str, port: int, key: str) -> PeerConn | None:
+        tls = False
         try:
             sock = socket.create_connection((ip, port), timeout=DIAL_TIMEOUT)
+        except OSError:
+            return None
+        if self.tls_outbound:
+            try:
+                sock = crypto.client_ctx().wrap_socket(sock)
+                tls = True
+            except (OSError, ssl.SSLError):
+                # пир без TLS (старая версия) — откат на plain новым сокетом:
+                # после сорвавшегося рукопожатия поток уже «грязный»
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                try:
+                    sock = socket.create_connection((ip, port), timeout=DIAL_TIMEOUT)
+                except OSError:
+                    return None
+        try:
             sock.settimeout(None)
             hello = protocol.encode_frame(protocol.make_packet(
                 "hello", node=self.node_id, name=self.name, msg_port=self.tcp_port))
             sock.sendall(hello)
         except OSError:
+            try:
+                sock.close()
+            except OSError:
+                pass
             return None
+        if tls:
+            self._record_fingerprint(key, sock)
         return self._register(key, sock, protocol.FrameDecoder(), [],
                               pc=PeerConn(sock, key), outbound=True)
 
@@ -293,12 +385,13 @@ class ConnectionManager:
     # --- отправка ---
 
     def send(self, key: str, ip: str, port: int, text: str,
-             timeout: float = 3.0, img: str = None) -> tuple[str, bool]:
+             timeout: float = 3.0, img: str = None, enc: bool = False) -> tuple[str, bool]:
         """Отправить сообщение. Сначала — по живому соединению (неважно,
         кто его установил), иначе — пробуем подключиться сами."""
         msg_id = protocol.new_id()
         frame = protocol.encode_frame(protocol.make_message(
-            self.name, text, msg_id=msg_id, msg_port=self.tcp_port, img=img))
+            self.name, text, msg_id=msg_id, msg_port=self.tcp_port,
+            img=img, enc=enc))
 
         with self._lock:
             pc = self.conns.get(key)
