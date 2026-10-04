@@ -22,9 +22,11 @@ from PyQt6.QtWidgets import (
 from ..core.engine import Engine
 from . import theme
 
-STATUS_MARKS = {"sending": "…", "delivered": "✓✓", "failed": "✗"}
+STATUS_WORDS = {"sending": "Отправляется", "delivered": "Доставлено",
+                "failed": "Ошибка"}
 MAX_BUBBLE_RATIO = 0.65
 PAD_X, PAD_Y = 12, 8
+SEP_HEIGHT = 24
 
 
 class ChatInput(QLineEdit):
@@ -51,7 +53,11 @@ def _layout(msg, avail_w: int):
     if img:
         path = Engine.img_path(img).replace("\\", "/")
         body += f'<br><img src="file:///{path}" width="280">'
-    mark = f" {STATUS_MARKS.get(status, '')}" if direction == "out" else ""
+    mark = ""
+    if direction == "out":
+        word = STATUS_WORDS.get(status, "")
+        if word:
+            mark = f" · {word}"
     meta = f' <span style="color:{ts_col}; font-size:8pt">{time_str}{mark}</span>'
     if direction == "in":
         body = f'<b style="color:{colors["accent"]}">{html.escape(author)}</b><br>' + body
@@ -73,6 +79,15 @@ class BubbleDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option, index):
         msg = index.data(Qt.ItemDataRole.UserRole)
         direction = msg[0]
+        if direction == "sep":
+            # разделитель дат: серый центрированный текст без пузыря
+            painter.save()
+            color = QColor(theme.bubbles()["ts"])
+            painter.setPen(color)
+            painter.drawText(option.rect.adjusted(0, 4, 0, 0),
+                             Qt.AlignmentFlag.AlignHCenter, f"— {msg[1]} —")
+            painter.restore()
+            return
         colors = theme.bubbles()
         rect = option.rect
         doc, content_w, content_h = _layout(msg, rect.width())
@@ -98,6 +113,8 @@ class BubbleDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index) -> QSize:
         msg = index.data(Qt.ItemDataRole.UserRole)
         w = option.rect.width() or 400
+        if msg[0] == "sep":
+            return QSize(w, SEP_HEIGHT)
         _, _, content_h = _layout(msg, w)
         return QSize(w, content_h + 6)
 
@@ -117,10 +134,12 @@ class ChatPanel(QWidget):
         self.invite_btn.setToolTip("Код-приглашение в комнату для пересылки")
         self.invite_btn.setVisible(False)
         self.invite_btn.clicked.connect(self._show_invite)
-        self.rdp_btn = QPushButton("RDP")
-        self.rdp_btn.setToolTip("Проброс удалённого рабочего стола через канал мессенджера")
+        self.rdp_btn = QPushButton()
+        self.rdp_btn.setToolTip("Удалённый рабочий стол")
         self.rdp_btn.setEnabled(False)
         self.rdp_btn.clicked.connect(self._toggle_rdp)
+        self._rdp_icon_active = None  # кэш состояния иконки (True/False/None)
+        self._set_rdp_icon(False)
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.addWidget(self.header, 1)
@@ -164,7 +183,7 @@ class ChatPanel(QWidget):
 
     def _maybe_open_image(self, item):
         msg = item.data(Qt.ItemDataRole.UserRole)
-        if msg and msg[5]:  # img
+        if msg and msg[0] != "sep" and msg[5]:  # img
             self.viewer.open_image(Engine.img_path(msg[5]))
 
     def resizeEvent(self, event):
@@ -187,6 +206,16 @@ class ChatPanel(QWidget):
         self._set_enabled(False)
         self.rdp_btn.setEnabled(False)
         self.invite_btn.setVisible(False)
+
+    def _set_rdp_icon(self, active: bool):
+        """Иконка-монитор: бирюзовая при активном туннеле, серая иначе."""
+        state = (active, theme.current())
+        if self._rdp_icon_active == state:
+            return
+        self._rdp_icon_active = state
+        color = theme.ACCENT if active else theme.bubbles()["ts"]
+        self.rdp_btn.setIcon(theme.make_monitor_icon(color))
+        self.rdp_btn.setIconSize(QSize(20, 20))
 
     def _set_enabled(self, on: bool):
         self.input.setEnabled(on)
@@ -367,11 +396,9 @@ class ChatPanel(QWidget):
             status = "в сети" if (node and node.online) else "не в сети"
             self.header.setText(f"{name}  —  {status}")
             port = self.engine.tunnel.rdp_port(self.key)
-            if port:
-                self.rdp_btn.setText(f"RDP: 127.0.0.1:{port} → {name} ✕")
-                self.rdp_btn.setToolTip(f"Туннель к {name} ({node.ip if node else ''})")
-            else:
-                self.rdp_btn.setText("RDP")
+            self._set_rdp_icon(bool(port))
+            self.rdp_btn.setToolTip(
+                "Закрыть туннель" if port else "Удалённый рабочий стол")
             self.rdp_btn.setVisible(self.engine.rdp_enabled)
             self.invite_btn.setVisible(False)
 
@@ -392,9 +419,28 @@ class ChatPanel(QWidget):
 
     def _rebuild(self, msgs):
         self.history.clear()
+        last_day = None
         for m in msgs:
+            day = time.localtime(m.timestamp)[:3]
+            if day != last_day:
+                sep = QListWidgetItem()
+                sep.setFlags(Qt.ItemFlag.NoItemFlags)  # неселектируемый
+                sep.setData(Qt.ItemDataRole.UserRole,
+                            ("sep", _day_label(m.timestamp)))
+                self.history.addItem(sep)
+                last_day = day
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole,
                          (m.direction, m.author, m.text, m.timestamp,
                           m.status, m.img))
             self.history.addItem(item)
+
+
+def _day_label(ts: float) -> str:
+    """«Сегодня» / «Вчера» / «02.10.2026» по дате сообщения."""
+    day = time.localtime(ts)[:3]
+    if day == time.localtime()[:3]:
+        return "Сегодня"
+    if day == time.localtime(time.time() - 86400)[:3]:
+        return "Вчера"
+    return time.strftime("%d.%m.%Y", time.localtime(ts))

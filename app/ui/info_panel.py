@@ -49,6 +49,11 @@ class InfoPanel(QWidget):
         self.members_list = QListWidget()
         self.members_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
+        self.mute_btn = QPushButton("Уведомления")
+        self.mute_btn.setCheckable(True)
+        self.mute_btn.setToolTip("Звук и тосты о новых сообщениях этого чата")
+        self.mute_btn.toggled.connect(self._mute_toggled)
+
         self.invite_btn = QPushButton("Пригласить")
         self.invite_btn.setToolTip("Код-приглашение в комнату для пересылки")
         self.invite_btn.clicked.connect(self.chat_panel._show_invite)
@@ -65,6 +70,7 @@ class InfoPanel(QWidget):
         content_lay.addWidget(self.status_label)
         content_lay.addWidget(self.channel_label)
         content_lay.addWidget(self.tunnel_label)
+        content_lay.addWidget(self.mute_btn)
         content_lay.addWidget(self.members_list, 1)
         content_lay.addWidget(self.invite_btn)
         content_lay.addWidget(self.rdp_btn)
@@ -146,6 +152,7 @@ class InfoPanel(QWidget):
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled)
                 self.members_list.addItem(item)
         self.members_list.show()
+        self.mute_btn.hide()
         self.invite_btn.show()
         self.rdp_btn.hide()
 
@@ -170,8 +177,17 @@ class InfoPanel(QWidget):
             f"туннель активен: 127.0.0.1:{port}" if port else "туннель: нет")
         self.tunnel_label.show()
         self.members_list.hide()
+        self.mute_btn.blockSignals(True)
+        self.mute_btn.setChecked(not self.engine.is_chat_muted(key))
+        self.mute_btn.blockSignals(False)
+        self.mute_btn.show()
         self.invite_btn.hide()
         self.rdp_btn.setVisible(self.engine.rdp_enabled)
         self.rdp_btn.setEnabled(online)
         self.rdp_btn.setText(
             "Закрыть RDP-туннель" if port else "Подключиться по RDP")
+
+    def _mute_toggled(self, checked: bool):
+        key = self.chat_panel.key
+        if key and not key.startswith("room:"):
+            self.engine.set_chat_muted(key, not checked)

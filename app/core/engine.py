@@ -44,6 +44,7 @@ class Engine:
         self.tcp_port = tcp_port
         self.chats: dict[str, list[ChatMessage]] = {}
         self.unread: dict[str, int] = {}
+        self.muted_chats: set[str] = set()  # ключи чатов без тостов/звука
         self._lock = threading.Lock()
         self.on_message_event = None  # callback(key, ChatMessage) для UI
         self._push_enabled = False
@@ -841,6 +842,18 @@ class Engine:
     def unread_count(self, key: str) -> int:
         return self.unread.get(key, 0)
 
+    # --- пер-чатовый мьют уведомлений ---
+
+    def set_chat_muted(self, key: str, muted: bool):
+        if muted:
+            self.muted_chats.add(key)
+        else:
+            self.muted_chats.discard(key)
+        self.save_settings()
+
+    def is_chat_muted(self, key: str) -> bool:
+        return key in self.muted_chats
+
     # --- фильтр входящих / отклонённые ---
 
     def set_accept_all(self, on: bool):
@@ -981,6 +994,7 @@ class Engine:
             "scan_enabled": self.scan_enabled,
             "shadow_rdp": self.shadow_rdp,
             "sort_mode": self.sort_mode,
+            "muted_chats": sorted(self.muted_chats),
             "manual_ip_enabled": self.manual_ip_enabled,
             "room_join_enabled": self.room_join_enabled,
             "hub_enabled": self.hub_enabled,
@@ -1019,6 +1033,7 @@ class Engine:
         self.scan_enabled = bool(data.get("scan_enabled", False))
         self.shadow_rdp = bool(data.get("shadow_rdp", False))
         self.sort_mode = str(data.get("sort_mode", "status"))
+        self.muted_chats = {str(k) for k in (data.get("muted_chats") or [])}
         self.manual_ip_enabled = bool(data.get("manual_ip_enabled", False))
         self.room_join_enabled = bool(data.get("room_join_enabled", False))
         self.hub_enabled = bool(data.get("hub_enabled", False))

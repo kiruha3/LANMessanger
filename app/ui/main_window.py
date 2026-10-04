@@ -93,6 +93,11 @@ class MainWindow(QMainWindow):
         # --- левая панель ---
         self.name_edit = QLineEdit(engine.name)
         self.name_edit.setPlaceholderText("Моё имя в сети")
+        self.name_edit.setToolTip("Моё имя в сети")
+        self.name_edit.setMaximumWidth(150)
+        self.name_edit.setStyleSheet(
+            "QLineEdit { border: none; background: transparent; "
+            "padding: 1px 2px; font-size: 9pt; }")
         self.name_edit.editingFinished.connect(self._name_changed)
 
         self.search_edit = QLineEdit()
@@ -164,9 +169,17 @@ class MainWindow(QMainWindow):
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(self.exit_btn, 1)
 
+        self.net_status = QLabel()
+        self.net_status.setStyleSheet("padding: 2px 4px;")
+
         left_layout = QVBoxLayout()
-        left_layout.addWidget(QLabel("Моё имя:"))
-        left_layout.addWidget(self.name_edit)
+        header_row = QHBoxLayout()
+        computers_label = QLabel("Компьютеры")
+        computers_label.setStyleSheet("font-weight:bold;")
+        header_row.addWidget(computers_label)
+        header_row.addStretch(1)
+        header_row.addWidget(self.name_edit)
+        left_layout.addLayout(header_row)
         left_layout.addWidget(self.search_edit)
         left_layout.addLayout(addip_row)
         left_layout.addLayout(room_row)
@@ -175,6 +188,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.node_list, 1)
         left_layout.addWidget(self.scan_btn)
         left_layout.addLayout(bottom_row)
+        left_layout.addWidget(self.net_status)
         left = QWidget()
         left.setLayout(left_layout)
         left.setMinimumWidth(180)  # иначе окно не сожмётся до узкого режима
@@ -404,8 +418,8 @@ class MainWindow(QMainWindow):
 
     def _on_new_message(self, key: str):
         self._last_msg_key = key
-        self.refresh()
-        if self._muted():
+        self.refresh()  # unread-бейдж обновляется даже у замьюченного чата
+        if self._muted() or self.engine.is_chat_muted(key):
             return
         if self.isVisible() and self.chat_panel.key == key and self.isActiveWindow():
             return
@@ -628,6 +642,21 @@ class MainWindow(QMainWindow):
 
     # --- дерево узлов, комнат и устройств ---
 
+    def _update_net_status(self):
+        """Строка внизу левой панели: «Приложение в сети» / «Нет соединения»."""
+        try:
+            alive = any(pc.alive
+                        for pc in list(self.engine.connections.conns.values()))
+        except RuntimeError:
+            alive = False  # словарь каналов меняется из сетевых потоков
+        online = alive or any(n.online for n in self.engine.nodes())
+        if online:
+            self.net_status.setText(
+                '<span style="color:#22c55e">●</span> Приложение в сети')
+        else:
+            self.net_status.setText(
+                '<span style="color:#8a8a8a">●</span> Нет соединения')
+
     @staticmethod
     def _room_key(room_info: dict) -> str:
         return f"room:{room_info.get('hub_key', '')}/{room_info.get('room', '')}"
@@ -635,6 +664,7 @@ class MainWindow(QMainWindow):
     def refresh(self):
         self._refresh_rejected()
         self.info_panel.refresh()
+        self._update_net_status()
         query = self.search_edit.text().strip().lower()
         nodes = self._sorted_nodes(self.engine.nodes())
         rooms = list(getattr(self.engine, "my_rooms", []))
