@@ -32,6 +32,7 @@ h = make_engine("Hub", 46701, 46711,
                 [("127.0.0.1", 46702), ("127.0.0.1", 46703)], "h.db")
 a = make_engine("Alice", 46702, 46712, [("127.0.0.1", 46701)], "a.db")
 b = make_engine("Bob", 46703, 46713, [("127.0.0.1", 46701)], "b.db")
+h.hub_enabled = True  # дефолт выкл с 0.18.0
 h.start()
 a.start()
 b.start()

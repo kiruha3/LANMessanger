@@ -101,6 +101,10 @@ class SettingsDialog(QDialog):
         self.hub_box.setChecked(getattr(engine, "hub_enabled", True))
         self.push_box = Switch("Уведомления на телефон (ntfy, порт 8087)")
         self.push_box.setChecked(engine.push_status()[0])
+        self.manual_ip_box = Switch("Ручное добавление по IP")
+        self.manual_ip_box.setChecked(getattr(engine, "manual_ip_enabled", False))
+        self.room_join_box = Switch("Вход в комнаты (комната@IP-хаба)")
+        self.room_join_box.setChecked(getattr(engine, "room_join_enabled", False))
         self.notify_box = Switch("Информационные уведомления (новые версии у узлов)")
         self.notify_box.setChecked(engine.notify_update)
         self.test_btn = QPushButton("Тест уведомления — как увидят другие")
@@ -112,6 +116,8 @@ class SettingsDialog(QDialog):
         fl.addWidget(self.scan_box)
         fl.addWidget(self.hub_box)
         fl.addWidget(self.push_box)
+        fl.addWidget(self.manual_ip_box)
+        fl.addWidget(self.room_join_box)
         fl.addWidget(self.notify_box)
         fl.addWidget(self.test_btn)
 
@@ -191,6 +197,8 @@ class SettingsDialog(QDialog):
         engine.set_feature("scan_enabled", self.scan_box.isChecked())
         engine.set_feature("hub_enabled", self.hub_box.isChecked())
         engine.set_push(self.push_box.isChecked())
+        engine.set_feature("manual_ip_enabled", self.manual_ip_box.isChecked())
+        engine.set_feature("room_join_enabled", self.room_join_box.isChecked())
         engine.set_notify_update(self.notify_box.isChecked())
         url = self.url_edit.text().strip()
         if url and url != engine.update_url:

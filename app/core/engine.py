@@ -71,7 +71,7 @@ class Engine:
         self.rooms: dict[str, set[str]] = {}  # комната -> ключи каналов участников
         self.my_rooms: list[dict] = []  # {"hub_key", "hub_name", "room", "members"}
         self._saved_rooms: list[list[str]] = []  # из settings, пере-join в start()
-        self.hub_enabled = True
+        self.hub_enabled = False  # принимать комнаты (быть хабом) — по свитчу
         self._seen_ids: set[str] = set()
         self._seen_order: collections.deque = collections.deque()
         self.connections.on_hub = self._on_hub
@@ -81,7 +81,7 @@ class Engine:
         self._notified_versions: set[str] = set()
         self.update_url = DEFAULT_UPDATE_URL
         self.update_text = DEFAULT_UPDATE_TEXT
-        self.notify_update = True
+        self.notify_update = False  # алерты о версиях — по свитчу
         self.connections.on_connect = self._on_peer_connected
         self.connections.on_events = self._on_events_packet
         self._remind_interval = 30.0
@@ -91,9 +91,11 @@ class Engine:
         self.theme = "light"
         self.push: PushServer | None = None
         self.rdp_enabled = True
-        self.scan_enabled = True
+        self.scan_enabled = False  # сканер — по свитчу
         self.shadow_rdp = False  # RDP: совместный сеанс (shadow) — по умолчанию выкл
         self.sort_mode = "status"  # status | name | ip
+        self.manual_ip_enabled = False  # поле «IP вручную»
+        self.room_join_enabled = False  # поле «комната@IP»
         self.tls_enabled = True    # TLS на TCP-канал (self-signed + пиннинг)
         self.network_psk = ""      # сетевой пароль: PSK-шифрование личных msg
         self.known_fingerprints: dict[str, str] = {}  # key -> отпечаток TLS пира
@@ -979,6 +981,8 @@ class Engine:
             "scan_enabled": self.scan_enabled,
             "shadow_rdp": self.shadow_rdp,
             "sort_mode": self.sort_mode,
+            "manual_ip_enabled": self.manual_ip_enabled,
+            "room_join_enabled": self.room_join_enabled,
             "hub_enabled": self.hub_enabled,
             "tls_enabled": self.tls_enabled,
             "network_psk": self.network_psk,
@@ -1012,10 +1016,12 @@ class Engine:
         self.connections.accept_all = bool(data.get("accept_all", False))
         self.theme = str(data.get("theme", "light"))
         self.set_feature("rdp_enabled", bool(data.get("rdp_enabled", True)))
-        self.scan_enabled = bool(data.get("scan_enabled", True))
+        self.scan_enabled = bool(data.get("scan_enabled", False))
         self.shadow_rdp = bool(data.get("shadow_rdp", False))
         self.sort_mode = str(data.get("sort_mode", "status"))
-        self.hub_enabled = bool(data.get("hub_enabled", True))
+        self.manual_ip_enabled = bool(data.get("manual_ip_enabled", False))
+        self.room_join_enabled = bool(data.get("room_join_enabled", False))
+        self.hub_enabled = bool(data.get("hub_enabled", False))
         self.tls_enabled = bool(data.get("tls_enabled", True))
         self.network_psk = str(data.get("network_psk", ""))
         self.known_fingerprints = {str(k): str(v) for k, v in
@@ -1033,7 +1039,7 @@ class Engine:
         else:
             self.update_url = saved_url or DEFAULT_UPDATE_URL
         self.update_text = str(data.get("update_text") or DEFAULT_UPDATE_TEXT)
-        self.notify_update = bool(data.get("notify_update", True))
+        self.notify_update = bool(data.get("notify_update", False))
         self.discovery.update_url = self.update_url
         self.discovery.update_text = self.update_text
         push = data.get("push") or {}

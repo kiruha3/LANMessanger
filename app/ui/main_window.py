@@ -126,6 +126,12 @@ class MainWindow(QMainWindow):
         room_row.addWidget(self.room_edit, 1)
         room_row.addWidget(self.room_btn)
 
+        # строки «IP вручную» и «комната@IP» скрыты по умолчанию (флаги)
+        self._addip_widgets = [self.addip_edit, self.addip_btn]
+        self._room_widgets = [self.room_edit, self.room_btn]
+        for w in self._addip_widgets + self._room_widgets:
+            w.hide()
+
         self.node_list = QTreeWidget()
         self.node_list.setHeaderHidden(True)
         self.node_list.setIndentation(14)
@@ -163,6 +169,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(bottom_row)
         left = QWidget()
         left.setLayout(left_layout)
+        self._apply_feature_visibility()
 
         # --- правая панель ---
         self.chat_panel = ChatPanel(engine)
@@ -174,10 +181,12 @@ class MainWindow(QMainWindow):
         splitter.setSizes([300, 560])
 
         from .calendar_window import CalendarWindow
+        from .help_tab import HelpTab
 
         self.tabs = QTabWidget()
         self.tabs.addTab(splitter, "Чаты")
         self.tabs.addTab(CalendarWindow(engine), "Календарь")
+        self.tabs.addTab(HelpTab(), "Помощь")
         self.setCentralWidget(self.tabs)
 
         # колокольчик уведомлений в правом верхнем углу вкладок
@@ -209,6 +218,13 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     # --- трей ---
+
+    def _apply_feature_visibility(self):
+        """Показать/скрыть продвинутые поля по флагам (без перезапуска)."""
+        for w in self._addip_widgets:
+            w.setVisible(getattr(self.engine, "manual_ip_enabled", False))
+        for w in self._room_widgets:
+            w.setVisible(getattr(self.engine, "room_join_enabled", False))
 
     def _setup_tray(self):
         self.tray = QSystemTrayIcon(make_icon(), self)
@@ -373,6 +389,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self, self.engine)
         if dlg.exec():
             self.scan_btn.setVisible(self.engine.scan_enabled)
+            self._apply_feature_visibility()
 
     def _show_tunnel_error(self, key: str, text: str):
         node = self.engine.node_by_key(key)

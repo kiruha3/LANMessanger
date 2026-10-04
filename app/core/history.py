@@ -28,6 +28,7 @@ class History:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_key ON messages(key, timestamp)")
         self._db.commit()
+        self.init_events()  # таблица events нужна уже при открытии UI
 
     def add(self, key: str, msg):
         with self._lock:

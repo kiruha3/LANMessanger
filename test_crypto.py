@@ -74,6 +74,7 @@ h = make_engine("Hub", 46721, 46731,
 a = make_engine("Alice", 46722, 46732, [("127.0.0.1", 46721)], "crypto_a.db")
 b = make_engine("Bob", 46723, 46733, [("127.0.0.1", 46721)], "crypto_b.db")
 c = make_engine("Carol", 46724, 46734, [("127.0.0.1", 46721)], "crypto_c.db")
+h.hub_enabled = True  # дефолт выкл с 0.18.0
 h.start()
 a.start()
 b.start()
