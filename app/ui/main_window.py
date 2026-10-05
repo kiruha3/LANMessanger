@@ -207,6 +207,9 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(2, 0)
         splitter.setCollapsible(2, False)
         splitter.setSizes([300, 560, 220])
+        self._splitter = splitter
+        self._info_saved_w = 220  # ширина панели до сворачивания
+        self.info_panel.collapsed_changed.connect(self._on_info_collapsed)
 
         from .calendar_window import CalendarWindow
         from .help_tab import HelpTab
@@ -290,9 +293,51 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # узкое окно: инфо-панель авто-скрывается; состояние зажима
-        # (collapsed) не трогаем — при расширении оно восстановится само
-        self.info_panel.set_auto_hidden(self.width() < 950)
+        narrow = self.width() < 950
+        was = self.info_panel.auto_hidden
+        self.info_panel.set_auto_hidden(narrow)
+        if getattr(self, "_suppress_panel_reclaim", False):
+            return
+        sizes = self._splitter.sizes()
+        if len(sizes) != 3:
+            return
+        if narrow and not was and sizes[2] > 36:
+            # окно сузили — панель в полосу-зажим, место отдаём чату
+            if not self.info_panel.collapsed:
+                self._info_saved_w = sizes[2]
+            self._splitter.setSizes(
+                [sizes[0], sizes[1] + sizes[2] - 36, 36])
+        elif not narrow and was and not self.info_panel.collapsed:
+            # окно расширили — возвращаем панели сохранённую ширину
+            sizes = self._splitter.sizes()
+            give = self._info_saved_w - 36
+            if sizes[1] > give + 280:
+                self._splitter.setSizes(
+                    [sizes[0], sizes[1] - give, self._info_saved_w])
+
+    def _on_info_collapsed(self, collapsed: bool):
+        """Сворачивание панели уменьшает окно, разворачивание — возвращает."""
+        sizes = self._splitter.sizes()
+        if len(sizes) != 3 or self.isMaximized():
+            return
+        if collapsed:
+            if sizes[2] > 40:
+                self._info_saved_w = sizes[2]
+            delta = max(0, self._info_saved_w - 36)
+            target = [sizes[0], sizes[1], 36]
+        else:
+            delta = max(0, self._info_saved_w - 36)
+            target = [sizes[0], sizes[1], self._info_saved_w]
+        self._suppress_panel_reclaim = True
+        if delta:
+            self.resize(self.width() + (-delta if collapsed else delta),
+                        self.height())
+
+        def _finish(t=target):
+            self._splitter.setSizes(t)
+            self._suppress_panel_reclaim = False
+
+        QTimer.singleShot(0, _finish)
 
     def _apply_feature_visibility(self):
         """Показать/скрыть продвинутые поля по флагам (без перезапуска)."""
@@ -664,6 +709,7 @@ class MainWindow(QMainWindow):
     def refresh(self):
         self._refresh_rejected()
         self.info_panel.refresh()
+        self._normalize_panel()
         self._update_net_status()
         query = self.search_edit.text().strip().lower()
         nodes = self._sorted_nodes(self.engine.nodes())
@@ -786,12 +832,44 @@ class MainWindow(QMainWindow):
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if not data:
             return
+        was_visible = self.info_panel.isVisible()
         if data.startswith("host:"):
             ip = data[5:]
             self.chat_panel.show_hint(f"{ip} — на устройстве нет мессенджера")
         else:
             self.chat_panel.set_key(data)
         self.info_panel.refresh()
+        if self.info_panel.isVisible() and not was_visible \
+                and not self.isMaximized():
+            # панель появилась — расширяем окно, чтобы чат не сжимался
+            strip = self.info_panel.collapsed or self.info_panel.auto_hidden
+            grow = 36 if strip else max(120, self._info_saved_w)
+            sizes = self._splitter.sizes()
+            self._suppress_panel_reclaim = True
+            self.resize(self.width() + grow, self.height())
+
+            def _finish(s=sizes, g=grow):
+                if len(s) == 3:
+                    self._splitter.setSizes([s[0], s[1], g])
+                self._suppress_panel_reclaim = False
+
+            QTimer.singleShot(0, _finish)
+        else:
+            self._normalize_panel()
+
+    def _normalize_panel(self):
+        """Сплиттер хранит «виртуальную» ширину панели: после показа/скрытия
+        справа от чата остаётся мёртвая область и пузыри уходят под неё.
+        Подгоняем ширины под реальное состояние панели."""
+        p = self.info_panel
+        sizes = self._splitter.sizes()
+        if len(sizes) != 3 or not p.isVisible():
+            return
+        strip = p.collapsed or p.auto_hidden
+        target = 36 if strip else max(120, self._info_saved_w)
+        if sizes[2] != target and sizes[2] - p.width() > 4:
+            self._splitter.setSizes(
+                [sizes[0], sizes[1] + sizes[2] - target, target])
 
     def _tree_context_menu(self, pos):
         item = self.node_list.itemAt(pos)

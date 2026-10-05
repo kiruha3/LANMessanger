@@ -2,8 +2,8 @@
 
 import os
 
-from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QPointF, QRectF, Qt
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 
 _current = "light"
 
@@ -153,5 +153,29 @@ def make_monitor_icon(color: str = "#8a8a8a", size: int = 20) -> QIcon:
     p.drawRoundedRect(QRectF(2 * s, 2.5 * s, 16 * s, 11 * s), 2 * s, 2 * s)
     p.drawLine(int(10 * s), int(13.5 * s), int(10 * s), int(16.5 * s))
     p.drawLine(int(6 * s), int(17 * s), int(14 * s), int(17 * s))
+    p.end()
+    return QIcon(pm)
+
+
+def make_triangle_icon(direction: str = "left", color: str = "#8a8a8a",
+                       size: int = 14) -> QIcon:
+    """Треугольник-стрелка для кнопки сворачивания панели.
+
+    Символы «◀/▶» на части систем (Win10) рендерятся пустым квадратом,
+    поэтому рисуем кодом. direction: "left" (свернуть) или "right".
+    """
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    s = size / 14.0
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color))
+    if direction == "left":
+        pts = [(9.5, 3.0), (9.5, 11.0), (4.0, 7.0)]
+    else:
+        pts = [(4.5, 3.0), (4.5, 11.0), (10.0, 7.0)]
+    poly = QPolygonF([QPointF(x * s, y * s) for x, y in pts])
+    p.drawPolygon(poly)
     p.end()
     return QIcon(pm)

@@ -4,7 +4,7 @@
 не выбран; кнопка-зажим сворачивает её в узкую полосу.
 """
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -21,6 +21,8 @@ from . import theme
 class InfoPanel(QWidget):
     """Инфо-панель справа от чата. refresh() дергается таймером MainWindow."""
 
+    collapsed_changed = pyqtSignal(bool)
+
     def __init__(self, engine, chat_panel):
         super().__init__()
         self.engine = engine
@@ -28,7 +30,7 @@ class InfoPanel(QWidget):
         self.collapsed = False
         self._auto_hidden = False  # окно сузилось < 950px (управляет MainWindow)
 
-        self.collapse_btn = QPushButton("▶")
+        self.collapse_btn = QPushButton()
         self.collapse_btn.setFixedWidth(24)
         self.collapse_btn.setToolTip("Свернуть/развернуть панель")
         self.collapse_btn.clicked.connect(self.toggle_collapsed)
@@ -92,8 +94,16 @@ class InfoPanel(QWidget):
     # --- видимость / сворачивание ---
 
     def toggle_collapsed(self):
-        self.collapsed = not self.collapsed
+        strip = self.collapsed or self._auto_hidden
+        if strip:
+            # открываем: если панель была авто-скрыта узким окном — считаем
+            # это явным желанием пользователя и снимаем авто-скрытие
+            self.collapsed = False
+            self._auto_hidden = False
+        else:
+            self.collapsed = True
         self._apply_state()
+        self.collapsed_changed.emit(self.collapsed or self._auto_hidden)
 
     def set_auto_hidden(self, hidden: bool):
         """Авто-скрытие при узком окне (состояние collapse не трогаем)."""
@@ -101,12 +111,19 @@ class InfoPanel(QWidget):
             self._auto_hidden = hidden
             self._apply_state()
 
+    @property
+    def auto_hidden(self) -> bool:
+        return self._auto_hidden
+
     def _apply_state(self):
         key = self.chat_panel.key
-        self.setVisible(bool(key) and not self._auto_hidden)
-        self.content.setVisible(not self.collapsed)
-        self.collapse_btn.setText("▶" if self.collapsed else "◀")
-        self.setMaximumWidth(36 if self.collapsed else 16777215)
+        self.setVisible(bool(key))
+        strip = self.collapsed or self._auto_hidden
+        self.content.setVisible(not strip)
+        color = theme.bubbles()["ts"]
+        direction = "right" if strip else "left"
+        self.collapse_btn.setIcon(theme.make_triangle_icon(direction, color))
+        self.setMaximumWidth(36 if strip else 16777215)
 
     # --- содержимое из engine ---
 
