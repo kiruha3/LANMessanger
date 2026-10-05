@@ -112,7 +112,10 @@ class BubbleDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index) -> QSize:
         msg = index.data(Qt.ItemDataRole.UserRole)
-        w = option.rect.width() or 400
+        # ширина строго по вьюпорту — иначе всплывает горизонтальный скролл
+        view = self.parent()
+        vw = view.viewport().width() if view and view.viewport() else 0
+        w = vw or option.rect.width() or 400
         if msg[0] == "sep":
             return QSize(w, SEP_HEIGHT)
         _, _, content_h = _layout(msg, w)
@@ -152,6 +155,8 @@ class ChatPanel(QWidget):
         self.history.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.history.setSpacing(2)
         self.history.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.history.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.input = ChatInput()
         self.input.setPlaceholderText("Сообщение… (Enter — отправить, Ctrl+V — картинка)")
@@ -188,6 +193,9 @@ class ChatPanel(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # ширина пузырей зависит от вьюпорта — пересчитываем размеры итемов
+        if hasattr(self, "history"):
+            self.history.doItemsLayout()
         if hasattr(self, "viewer"):
             self.viewer.dock()
 
