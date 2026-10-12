@@ -4,7 +4,7 @@ import threading
 import time
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QKeySequence, QPainter, QTextDocument
+from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QTextDocument
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStyledItemDelegate,
@@ -22,11 +23,13 @@ from PyQt6.QtWidgets import (
 from ..core.engine import Engine
 from . import theme
 
-STATUS_WORDS = {"sending": "Отправляется", "delivered": "Доставлено",
+STATUS_WORDS = {"sending": "Отправляется", "sent": "Отправлено",
+                "delivered": "Доставлено", "read": "Прочитано",
                 "failed": "Ошибка"}
 MAX_BUBBLE_RATIO = 0.65
 PAD_X, PAD_Y = 12, 8
 SEP_HEIGHT = 24
+QUOTE_BAR = 8  # отступ слева под полоску цитаты
 
 
 class ChatInput(QLineEdit):
@@ -44,8 +47,11 @@ class ChatInput(QLineEdit):
 
 
 def _layout(msg, avail_w: int):
-    """Единый расчёт: документ, ширина и высота пузыря."""
-    direction, author, text, ts, status, img = msg
+    """Единый расчёт: документы, ширина и высота пузыря.
+    msg: (direction, author, text, ts, status, img, reply, id);
+    reply — (автор, сниппет) цитируемого сообщения или None."""
+    direction, author, text, ts, status, img = msg[:6]
+    reply = msg[6] if len(msg) > 6 else None
     colors = theme.bubbles()
     ts_col = colors["ts"]
     time_str = time.strftime("%H:%M", time.localtime(ts))
@@ -63,14 +69,32 @@ def _layout(msg, avail_w: int):
         body = f'<b style="color:{colors["accent"]}">{html.escape(author)}</b><br>' + body
 
     max_w = max(120, int(avail_w * MAX_BUBBLE_RATIO))
+    reply_doc = None
+    reply_h = 0
+    if reply:
+        r_author, r_text = reply
+        snippet = html.escape((r_text or "[картинка]").replace("\n", " "))[:80]
+        reply_doc = QTextDocument()
+        reply_doc.setDocumentMargin(0)
+        reply_doc.setHtml(
+            f'<b style="color:{colors["accent"]}; font-size:8pt">'
+            f'{html.escape(r_author)}</b><br>'
+            f'<span style="color:{ts_col}; font-size:8pt">{snippet}</span>')
+        reply_doc.setTextWidth(max_w - 2 * PAD_X - QUOTE_BAR)
     doc = QTextDocument()
     doc.setDocumentMargin(0)
     doc.setHtml(f'<span style="color:{colors["text"]}">{body}</span>{meta}')
     doc.setTextWidth(max_w - 2 * PAD_X)
-    content_w = min(max_w, int(doc.idealWidth() + 0.5) + 2 * PAD_X)
+    ideal = doc.idealWidth()
+    if reply_doc:
+        ideal = max(ideal, reply_doc.idealWidth() + QUOTE_BAR)
+    content_w = min(max_w, int(ideal + 0.5) + 2 * PAD_X)
     doc.setTextWidth(content_w - 2 * PAD_X)
-    content_h = int(doc.size().height() + 0.5) + 2 * PAD_Y
-    return doc, content_w, content_h
+    if reply_doc:
+        reply_doc.setTextWidth(content_w - 2 * PAD_X - QUOTE_BAR)
+        reply_h = int(reply_doc.size().height() + 0.5) + 6
+    content_h = int(doc.size().height() + 0.5) + 2 * PAD_Y + reply_h
+    return reply_doc, doc, content_w, content_h, reply_h
 
 
 class BubbleDelegate(QStyledItemDelegate):
@@ -90,7 +114,8 @@ class BubbleDelegate(QStyledItemDelegate):
             return
         colors = theme.bubbles()
         rect = option.rect
-        doc, content_w, content_h = _layout(msg, rect.width())
+        reply_doc, doc, content_w, content_h, reply_h = _layout(
+            msg, rect.width())
 
         if direction == "out":
             bx = rect.right() - content_w - 8
@@ -106,7 +131,19 @@ class BubbleDelegate(QStyledItemDelegate):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(bg))
         painter.drawRoundedRect(bubble, 10, 10)
-        painter.translate(bubble.left() + PAD_X, bubble.top() + PAD_Y)
+        if reply_doc:
+            # полоска цитаты + блок «автор / сниппет» над текстом
+            painter.setBrush(QColor(colors["accent"]))
+            painter.drawRoundedRect(
+                QRectF(bubble.left() + 5, bubble.top() + PAD_Y + 1,
+                       3, max(6, reply_h - 8)), 1.5, 1.5)
+            painter.save()
+            painter.translate(bubble.left() + PAD_X + QUOTE_BAR,
+                              bubble.top() + PAD_Y)
+            reply_doc.drawContents(painter)
+            painter.restore()
+        painter.translate(bubble.left() + PAD_X,
+                          bubble.top() + PAD_Y + reply_h)
         doc.drawContents(painter)
         painter.restore()
 
@@ -118,7 +155,7 @@ class BubbleDelegate(QStyledItemDelegate):
         w = vw or option.rect.width() or 400
         if msg[0] == "sep":
             return QSize(w, SEP_HEIGHT)
-        _, _, content_h = _layout(msg, w)
+        *_, content_h, _ = _layout(msg, w)
         return QSize(w, content_h + 6)
 
 
@@ -157,11 +194,27 @@ class ChatPanel(QWidget):
         self.history.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.history.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.history.customContextMenuRequested.connect(self._history_menu)
 
         self.input = ChatInput()
         self.input.setPlaceholderText("Сообщение… (Enter — отправить, Ctrl+V — картинка)")
         self.input.image_pasted.connect(self._send_image)
         self.send_btn = QPushButton("Отправить")
+
+        # панель «Ответ на …» над полем ввода
+        self._reply_to: tuple | None = None  # (id, автор, сниппет)
+        self.reply_bar = QWidget()
+        reply_lay = QHBoxLayout(self.reply_bar)
+        reply_lay.setContentsMargins(8, 2, 8, 2)
+        self.reply_label = QLabel("")
+        self.reply_cancel = QPushButton("✕")
+        self.reply_cancel.setFixedWidth(26)
+        self.reply_cancel.setToolTip("Отменить ответ")
+        self.reply_cancel.clicked.connect(self._clear_reply)
+        reply_lay.addWidget(self.reply_label, 1)
+        reply_lay.addWidget(self.reply_cancel)
+        self.reply_bar.setVisible(False)
 
         bottom = QHBoxLayout()
         bottom.addWidget(self.input, 1)
@@ -171,6 +224,7 @@ class ChatPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(header_row)
         layout.addWidget(self.history, 1)
+        layout.addWidget(self.reply_bar)
         layout.addLayout(bottom)
 
         self.input.returnPressed.connect(self._send)
@@ -191,6 +245,50 @@ class ChatPanel(QWidget):
         if msg and msg[0] != "sep" and msg[5]:  # img
             self.viewer.open_image(Engine.img_path(msg[5]))
 
+    # --- меню сообщения: копировать / ответить ---
+
+    def _history_menu(self, pos):
+        item = self.history.itemAt(pos)
+        if not item:
+            return
+        msg = item.data(Qt.ItemDataRole.UserRole)
+        if not msg or msg[0] == "sep":
+            return
+        menu = QMenu(self)
+        copy_act = menu.addAction("Копировать")
+        reply_act = menu.addAction("Ответить")
+        act = menu.exec(self.history.viewport().mapToGlobal(pos))
+        if act is copy_act:
+            self._copy_message(msg)
+        elif act is reply_act:
+            self._set_reply(msg)
+
+    def _copy_message(self, msg):
+        cb = QApplication.clipboard()
+        if msg[5]:  # сообщение-картинка — копируем саму картинку
+            img = QImage(Engine.img_path(msg[5]))
+            if not img.isNull():
+                cb.setImage(img)
+                return
+        cb.setText(msg[2])
+
+    def _set_reply(self, msg):
+        author = msg[1]
+        snippet = (msg[2] or "[картинка]").replace("\n", " ")[:60]
+        self._reply_to = (msg[7], author, snippet)
+        self.reply_label.setText(f"Ответ для {author}: {snippet}")
+        self.reply_bar.setVisible(True)
+        self.input.setFocus()
+
+    def _clear_reply(self):
+        self._reply_to = None
+        self.reply_bar.setVisible(False)
+
+    def _take_reply_id(self):
+        reply_id = self._reply_to[0] if self._reply_to else None
+        self._clear_reply()
+        return reply_id
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # ширина пузырей зависит от вьюпорта — пересчитываем размеры итемов
@@ -202,6 +300,7 @@ class ChatPanel(QWidget):
     def set_key(self, key: str | None):
         self.key = key
         self._rendered = None
+        self._clear_reply()
         if key:
             self.engine.mark_read(key)
             self._set_enabled(True)
@@ -209,6 +308,7 @@ class ChatPanel(QWidget):
 
     def show_hint(self, text: str):
         self.key = None
+        self._clear_reply()
         self.header.setText(text)
         self.history.clear()
         self._set_enabled(False)
@@ -324,6 +424,7 @@ class ChatPanel(QWidget):
         text = self.input.text().strip()
         if not text or not self.key:
             return
+        reply_id = self._take_reply_id()
         parts = self._room_parts()
         if parts:
             hub_key, room = parts
@@ -331,6 +432,7 @@ class ChatPanel(QWidget):
             threading.Thread(
                 target=self.engine.send_room,
                 args=(hub_key, room, text),
+                kwargs={"reply_to": reply_id},
                 daemon=True,
             ).start()
             self._refresh(force=True)
@@ -339,7 +441,7 @@ class ChatPanel(QWidget):
         if not node:
             return
         self.input.clear()
-        msg = self.engine.add_outgoing(self.key, text)
+        msg = self.engine.add_outgoing(self.key, text, reply_to=reply_id)
         threading.Thread(
             target=self.engine.deliver,
             args=(self.key, msg, node.ip, node.tcp_port),
@@ -364,16 +466,18 @@ class ChatPanel(QWidget):
         name = f"{protocol.new_id()}.png"
         os.makedirs(os.path.join(base_dir(), "images"), exist_ok=True)
         qimg.save(Engine.img_path(name), "PNG")
+        reply_id = self._take_reply_id()
         if parts:
             hub_key, room = parts
             threading.Thread(
                 target=self.engine.send_room,
                 args=(hub_key, room, ""),
-                kwargs={"img": name},
+                kwargs={"img": name, "reply_to": reply_id},
                 daemon=True,
             ).start()
         else:
-            msg = self.engine.add_outgoing(self.key, "", img=name)
+            msg = self.engine.add_outgoing(self.key, "", img=name,
+                                           reply_to=reply_id)
             threading.Thread(
                 target=self.engine.deliver,
                 args=(self.key, msg, node.ip, node.tcp_port),
@@ -427,6 +531,7 @@ class ChatPanel(QWidget):
 
     def _rebuild(self, msgs):
         self.history.clear()
+        by_id = {m.id: m for m in msgs}
         last_day = None
         for m in msgs:
             day = time.localtime(m.timestamp)[:3]
@@ -437,10 +542,17 @@ class ChatPanel(QWidget):
                             ("sep", _day_label(m.timestamp)))
                 self.history.addItem(sep)
                 last_day = day
+            reply = None
+            if m.reply_to:
+                orig = by_id.get(m.reply_to)
+                if orig:
+                    reply = (orig.author, orig.text or "[картинка]")
+                else:
+                    reply = ("", "сообщение не найдено")
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole,
                          (m.direction, m.author, m.text, m.timestamp,
-                          m.status, m.img))
+                          m.status, m.img, reply, m.id))
             self.history.addItem(item)
 
 

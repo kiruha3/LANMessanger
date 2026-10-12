@@ -30,8 +30,9 @@ class ChatMessage:
     author: str
     text: str
     timestamp: int
-    status: str = "received"  # out: sending -> delivered | failed
+    status: str = "received"  # out: sending -> sent -> delivered -> read | failed
     img: str | None = None    # имя файла в images/ (картинка из буфера)
+    reply_to: str | None = None  # id сообщения, на которое отвечаем
 
 
 class Engine:
@@ -102,6 +103,8 @@ class Engine:
         self.known_fingerprints: dict[str, str] = {}  # key -> отпечаток TLS пира
         self._p2p_key_cache: tuple[str, bytes] | None = None
         self.connections.on_tls_fingerprint = self._on_tls_fingerprint
+        self.connections.on_read = self._on_read_receipt
+        self._read_receipted: set[str] = set()  # id входящих, по которым слали read
         self.load_settings()
         self._apply_tls()
 
@@ -296,7 +299,8 @@ class Engine:
         if self.history:
             msgs = [ChatMessage(id=r[0], direction=r[1], author=r[2],
                                 text=r[3], timestamp=r[4], status=r[5],
-                                img=r[6] if len(r) > 6 else None)
+                                img=r[6] if len(r) > 6 else None,
+                                reply_to=r[7] if len(r) > 7 else None)
                     for r in self.history.load(key)]
         with self._lock:
             return self.chats.setdefault(key, msgs)
@@ -393,10 +397,12 @@ class Engine:
 
     # --- отправка ---
 
-    def add_outgoing(self, key: str, text: str, img: str = None) -> ChatMessage:
+    def add_outgoing(self, key: str, text: str, img: str = None,
+                     reply_to: str = None) -> ChatMessage:
         msg = ChatMessage(
             id=protocol.new_id(), direction="out", author=self.name,
             text=text, timestamp=protocol.now(), status="sending", img=img,
+            reply_to=reply_to,
         )
         with self._lock:
             self.chats.setdefault(key, []).append(msg)
@@ -423,9 +429,17 @@ class Engine:
         text = msg.text
         if p2p_key:
             text = crypto.encrypt(p2p_key, msg.text.encode("utf-8"))
+
+        def _sent():
+            # фрейм ушёл в сокет, ACK ещё не пришёл
+            msg.status = "sent"
+            if self.history:
+                self.history.update_status(key, db_id, "sent")
+
         msg_id, ok = self.connections.send(key, ip, port, text,
-                                           img=img_payload, enc=bool(p2p_key))
-        msg.id = msg_id
+                                           img=img_payload, enc=bool(p2p_key),
+                                           reply_to=msg.reply_to,
+                                           on_sent=_sent, msg_id=msg.id)
         msg.status = "delivered" if ok else "failed"
         if self.history:
             self.history.update_status(key, db_id, msg.status)
@@ -452,9 +466,10 @@ class Engine:
         except OSError:
             return None
 
-    def send(self, key: str, ip: str, port: int, text: str) -> ChatMessage:
+    def send(self, key: str, ip: str, port: int, text: str,
+             reply_to: str = None) -> ChatMessage:
         """Синхронная отправка (для консоли/тестов)."""
-        msg = self.add_outgoing(key, text)
+        msg = self.add_outgoing(key, text, reply_to=reply_to)
         self.deliver(key, msg, ip, port)
         return msg
 
@@ -498,7 +513,7 @@ class Engine:
             id=msg_id, direction="in",
             author=str(pkt.get("from") or ip), text=text,
             timestamp=int(pkt.get("timestamp") or protocol.now()),
-            img=img,
+            img=img, reply_to=pkt.get("reply_to"),
         )
         with self._lock:
             self.chats.setdefault(key, []).append(msg)
@@ -574,9 +589,9 @@ class Engine:
             self.on_rooms_changed()
 
     def send_room(self, hub_key: str, room: str, text: str,
-                  img: str = None) -> ChatMessage:
+                  img: str = None, reply_to: str = None) -> ChatMessage:
         key = self.room_chat_key(hub_key, room)
-        msg = self.add_outgoing(key, text, img)
+        msg = self.add_outgoing(key, text, img, reply_to=reply_to)
         self._seen_or_add(msg.id)  # своё эхо не показывать повторно
         img_raw = None
         if msg.img:
@@ -592,6 +607,8 @@ class Engine:
         password = entry.get("password") if entry else None
         fields = {"room": room, "id": msg.id, "from": self.name,
                   "timestamp": msg.timestamp}
+        if reply_to:
+            fields["reply_to"] = reply_to
         if password:
             rk = crypto.room_key(password, room)
             fields["text"] = crypto.encrypt(rk, text.encode("utf-8"))
@@ -733,7 +750,7 @@ class Engine:
             author=str(pkt.get("from") or "?"),
             text=text,
             timestamp=int(pkt.get("timestamp") or protocol.now()),
-            img=img,
+            img=img, reply_to=pkt.get("reply_to"),
         )
         key = self.room_chat_key(hub_key, room)
         with self._lock:
@@ -770,7 +787,8 @@ class Engine:
                 fields = {"room": room, "id": pkt.get("id"),
                           "from": pkt.get("from"), "text": pkt.get("text"),
                           "timestamp": pkt.get("timestamp"),
-                          "img": pkt.get("img")}
+                          "img": pkt.get("img"),
+                          "reply_to": pkt.get("reply_to")}
                 if crypto.is_encrypted(pkt):
                     fields["enc"] = True
                 self._relay_room_msg(room, pc.key, fields)
@@ -838,6 +856,51 @@ class Engine:
     def mark_read(self, key: str):
         with self._lock:
             self.unread[key] = 0
+        self._send_read_receipt(key)
+
+    def _send_read_receipt(self, key: str):
+        """Квитанция «прочитано» собеседнику: id входящих, по которым
+        квитанция ещё не уходила. Только P2P-чаты, только по живому каналу
+        (дозваниваться ради квитанции не стоит)."""
+        if key.startswith("room:"):
+            return
+        with self._lock:
+            msgs = self.chats.get(key)
+            if not msgs:
+                return
+            ids = [m.id for m in msgs
+                   if m.direction == "in" and m.id not in self._read_receipted]
+        if not ids:
+            return
+        ids = ids[-100:]  # не тащить простыню после долгой паузы
+        with self.connections._lock:
+            pc = self.connections.conns.get(key)
+        if not (pc and pc.alive):
+            return
+        try:
+            pc.send_packet("read", ids=ids)
+        except OSError:
+            return
+        self._read_receipted.update(ids)
+
+    def _on_read_receipt(self, pkt: dict, pc):
+        """Собеседник прочитал наши сообщения: статус out -> read."""
+        ids = set(pkt.get("ids") or [])
+        if not ids:
+            return
+        key = pc.key
+        with self._lock:
+            msgs = self.chats.get(key)
+            if not msgs:
+                return
+            changed = [m for m in msgs
+                       if m.direction == "out" and m.id in ids
+                       and m.status in ("sending", "sent", "delivered")]
+            for m in changed:
+                m.status = "read"
+        if self.history:
+            for m in changed:
+                self.history.update_status(key, m.id, "read")
 
     def unread_count(self, key: str) -> int:
         return self.unread.get(key, 0)

@@ -58,6 +58,7 @@ class ConnectionManager:
         self.on_hub = None     # callback(pkt, PeerConn) для комнат (hub_*)
         self.on_connect = None  # callback(key) — канал поднят (нужен sync)
         self.on_disconnect = None  # callback(key) — канал оборвался
+        self.on_read = None      # callback(pkt, PeerConn) — квитанция «прочитано»
         self.on_tls_fingerprint = None  # callback(key, fingerprint) — новый/сменившийся
         self.tls_cert = None     # путь к hub.crt; None — входящие только plain
         self.tls_key = None      # путь к hub.key
@@ -385,13 +386,17 @@ class ConnectionManager:
     # --- отправка ---
 
     def send(self, key: str, ip: str, port: int, text: str,
-             timeout: float = 3.0, img: str = None, enc: bool = False) -> tuple[str, bool]:
+             timeout: float = 3.0, img: str = None, enc: bool = False,
+             reply_to: str = None, on_sent=None,
+             msg_id: str = None) -> tuple[str, bool]:
         """Отправить сообщение. Сначала — по живому соединению (неважно,
-        кто его установил), иначе — пробуем подключиться сами."""
-        msg_id = protocol.new_id()
+        кто его установил), иначе — пробуем подключиться сами.
+        on_sent() вызывается, когда фрейм ушёл в сокет, но ACK ещё не пришёл.
+        msg_id — переиспользовать id вызывающей стороны (иначе сгенерируется)."""
+        msg_id = msg_id or protocol.new_id()
         frame = protocol.encode_frame(protocol.make_message(
             self.name, text, msg_id=msg_id, msg_port=self.tcp_port,
-            img=img, enc=enc))
+            img=img, enc=enc, reply_to=reply_to))
 
         with self._lock:
             pc = self.conns.get(key)
@@ -409,6 +414,8 @@ class ConnectionManager:
             with self._lock:
                 self._pending.pop(msg_id, None)
             return msg_id, False
+        if on_sent:
+            on_sent()
         ok = ev.wait(timeout)
         with self._lock:
             self._pending.pop(msg_id, None)
@@ -430,6 +437,9 @@ class ConnectionManager:
             ev = self._pending.get(pkt.get("ack_for", ""))
             if ev:
                 ev.set()
+        elif pkt["type"] == "read":
+            if self.on_read:
+                self.on_read(pkt, pc)
         elif pkt["type"].startswith("stream_"):
             if self.on_stream:
                 self.on_stream(pkt, pc)

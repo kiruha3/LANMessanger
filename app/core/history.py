@@ -25,6 +25,8 @@ class History:
         cols = [r[1] for r in self._db.execute("PRAGMA table_info(messages)")]
         if "img" not in cols:
             self._db.execute("ALTER TABLE messages ADD COLUMN img TEXT")
+        if "reply_to" not in cols:
+            self._db.execute("ALTER TABLE messages ADD COLUMN reply_to TEXT")
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_key ON messages(key, timestamp)")
         self._db.commit()
@@ -33,9 +35,11 @@ class History:
     def add(self, key: str, msg):
         with self._lock:
             self._db.execute(
-                "INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO messages (key, id, direction, author, text,"
+                " timestamp, status, img, reply_to) VALUES (?,?,?,?,?,?,?,?,?)",
                 (key, msg.id, msg.direction, msg.author, msg.text,
-                 msg.timestamp, msg.status, msg.img))
+                 msg.timestamp, msg.status, msg.img,
+                 getattr(msg, "reply_to", None)))
             self._db.commit()
 
     def update_status(self, key: str, msg_id: str, status: str):
@@ -48,8 +52,9 @@ class History:
     def load(self, key: str, limit: int = 500) -> list[tuple]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, direction, author, text, timestamp, status, img"
-                " FROM messages WHERE key=? ORDER BY timestamp DESC LIMIT ?",
+                "SELECT id, direction, author, text, timestamp, status, img,"
+                " reply_to FROM messages WHERE key=?"
+                " ORDER BY timestamp DESC LIMIT ?",
                 (key, limit)).fetchall()
         rows.reverse()
         return rows

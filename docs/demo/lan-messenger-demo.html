@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="deck-id" content="lan-messenger-demo">
+<meta name="description" content="Как LAN Messenger доставляет сообщение: UDP-обнаружение, прямой TLS-канал в локальной сети и комната через хаб.">
+<title>LAN Messenger — как доставляется сообщение</title>
+<style>
+:root{color-scheme:dark;--bg:#0a0e14;--panel:#131b26;--line:#2b3c52;--text:#edf2f8;--muted:#99abc2;--grid:#91b1e00a;--blue:#8bb9ff;--purple:#c5a3ff;--green:#4ee0a0;--gold:#ffcb70;--red:#ff8f8f;--glow:#b293ff17}
+:root[data-theme=light]{color-scheme:light;--bg:#f2f5fa;--panel:#fff;--line:#b8c8dd;--text:#182333;--muted:#4f637b;--grid:#244b7610;--blue:#245fae;--purple:#7243b4;--green:#08784b;--gold:#956000;--red:#b3372f;--glow:#8050bb0c}
+*{box-sizing:border-box}html,body{height:100%;margin:0}body{display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,sans-serif;overflow:hidden}
+button{font:inherit;color:inherit;background:var(--panel);border:1px solid var(--line);border-radius:9px;min-height:44px;padding:8px 14px;cursor:pointer}button:hover{border-color:var(--blue)}button:disabled{opacity:.35;cursor:default}button:focus-visible,a:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+.viewport{flex:1;min-height:0;display:grid;place-items:center;overflow:hidden;touch-action:pan-y}.frame{position:relative}.stage{position:absolute;width:1600px;height:900px;transform-origin:0 0;overflow:hidden;background:radial-gradient(ellipse at 50% 60%,var(--glow),transparent 65%),linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:auto,40px 40px,40px 40px}
+.head{position:absolute;left:80px;right:80px;top:58px;z-index:5;pointer-events:none}.eyebrow{font:600 16px ui-monospace,Consolas,monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--purple)}.eyebrow::before{content:"";display:inline-block;width:9px;height:9px;background:var(--purple);box-shadow:0 0 15px var(--purple);margin-right:14px;border-radius:2px}.head h1{font-size:50px;line-height:1.12;max-width:1450px;margin:22px 0 12px;letter-spacing:-.035em}.head p{font-size:24px;color:var(--muted);margin:0;max-width:1300px;line-height:1.4}
+.world{position:absolute;inset:0;transform-origin:0 0}
+.card{position:absolute;left:0;top:0;width:280px;height:148px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 16px 38px #0002;transform-origin:0 0;padding:19px 23px;will-change:transform,opacity}.card::before{content:"";position:absolute;left:-1px;top:23px;width:3px;height:34px;background:var(--accent);border-radius:3px}.card .tag{font:600 13px ui-monospace,Consolas,monospace;letter-spacing:.08em;color:var(--accent)}.card h2{font-size:27px;line-height:1.15;margin:10px 0 8px;letter-spacing:-.02em}.card p{font-size:17px;color:var(--muted);line-height:1.3;margin:0}
+.card[data-node=pcA]{--accent:var(--blue)}.card[data-node=pcB]{--accent:var(--gold)}
+
+.card[data-node=hub]{--accent:var(--purple);height:170px;background:repeating-linear-gradient(0deg,transparent 0 26px,var(--grid) 26px 28px),var(--panel)}
+.card[data-node=hub] .rack{display:flex;gap:10px;margin-top:10px}.card[data-node=hub] .rack i{width:44px;height:12px;border-radius:3px;background:var(--purple);opacity:.5}.card[data-node=hub] .rack i+i{opacity:.3}.card[data-node=hub] .rack i+i+i{opacity:.18}
+.card[data-node=msg]{--accent:var(--green);width:220px;height:120px;padding:14px 18px}.card[data-node=msg] h2{font-size:22px;margin:6px 0 4px}.card[data-node=msg] p{font-size:14px}
+.card[data-node=lock]{--accent:var(--red);width:190px;height:120px;padding:14px 18px}.card[data-node=lock] h2{font-size:21px;margin:6px 0 4px}.card[data-node=lock] p{font-size:14px}
+.icon{position:absolute;right:16px;top:14px;width:34px;height:34px;color:var(--accent)}
+.edges{position:absolute;inset:0;width:1600px;height:900px;overflow:visible;pointer-events:none}.edge{fill:none;stroke:var(--blue);stroke-width:2.5;stroke-linecap:butt}.edge[data-edge=pcA-hub],.edge[data-edge=hub-pcB]{stroke:var(--purple)}.packet{fill:var(--blue);filter:drop-shadow(0 0 5px var(--blue))}.packet[data-packet=pcA-hub],.packet[data-packet=hub-pcB]{fill:var(--purple);filter:drop-shadow(0 0 5px var(--purple))}
+.caption{position:absolute;left:80px;right:80px;bottom:55px;z-index:5;display:flex;align-items:flex-start;gap:24px;font-size:25px;line-height:1.42;pointer-events:none}.caption .number{color:var(--purple);font:500 19px ui-monospace,Consolas,monospace;padding-top:8px}.caption p{margin:0;max-width:1250px;background:var(--bg);box-shadow:0 0 20px 16px var(--bg)}
+.toolbar{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:76px;padding:12px 24px;border-top:1px solid var(--line);background:var(--bg);z-index:20}.controls,.utilities,.steps{display:flex;align-items:center;gap:8px}#position{color:var(--muted);font:13px ui-monospace,Consolas,monospace;min-width:60px;text-align:center}.steps button{padding:0;min-height:44px;width:34px;border:none;background:none;position:relative}.steps button::after{content:"";display:block;width:18px;height:4px;background:var(--line);border-radius:3px;margin:auto}.steps button[aria-current=step]::after{background:var(--purple)}.utilities button{font-size:15px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:18px;max-width:520px;padding:26px;line-height:1.6}dialog::backdrop{background:#0009}dialog h2{margin-top:0}kbd{font:14px ui-monospace,monospace;border:1px solid var(--line);border-radius:4px;padding:2px 5px}dialog button{float:right}
+@media(max-width:760px){.toolbar{padding:8px;gap:4px;flex-wrap:wrap;justify-content:center;min-height:110px}.steps{order:3;justify-content:center;width:100%}.utilities{margin-left:auto}.utilities button{padding:8px;min-width:44px}.controls button{padding:8px 12px}}
+@media(prefers-reduced-motion:reduce){.card{will-change:auto}.packet{display:none}}
+@media print{body{height:auto;display:block;overflow:visible}.toolbar,dialog{display:none}.viewport{display:block;height:900px}.frame{width:1600px!important;height:900px!important}.stage{transform:none!important}.world{transform:none!important}.head h1{font-size:46px}@page{size:landscape;margin:10mm}}
+</style>
+</head>
+<body>
+<main class="viewport" aria-label="Интерактивная схема">
+<div class="frame"><section class="stage" aria-roledescription="интерактивная сцена">
+  <header class="head"><div class="eyebrow" id="step-name">Схема доставки</div><h1 data-deck-title>LAN Messenger — как доставляется сообщение</h1><p>P2P в локальной сети и комнаты через хаб — на одной живой схеме.</p></header>
+  <div class="world">
+    <svg class="edges" viewBox="0 0 1600 900" aria-hidden="true">
+      <path class="edge" data-edge="pcA-pcB"/><path class="edge" data-edge="pcA-hub"/><path class="edge" data-edge="hub-pcB"/>
+      <circle class="packet" data-packet="pcA-pcB" r="4"/><circle class="packet" data-packet="pcA-hub" r="4"/><circle class="packet" data-packet="hub-pcB" r="4"/>
+    </svg>
+    <article class="card laptop" data-node="pcA"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M1 20h22"/></svg><div class="tag">КОМПЬЮТЕР / ЛОКАЛЬНАЯ СЕТЬ</div><h2>Аня</h2><p>LAN Messenger запущен,<br>порты UDP 45677 / TCP 45678</p></article>
+    <article class="card laptop" data-node="pcB"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M1 20h22"/></svg><div class="tag">КОМПЬЮТЕР / ЗА NAT</div><h2>Борис</h2><p>Тот же один exe,<br>без сервера и аккаунта</p></article>
+    <article class="card" data-node="hub"><div class="tag">РЕЛЕЙ / КОМНАТЫ</div><h2>Хаб</h2><div class="rack"><i></i><i></i><i></i></div><p>Только пересылает<br>шифротекст участникам</p></article>
+    <article class="card" data-node="msg"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2.5 6.5 12 13l9.5-6.5"/></svg><div class="tag">PAYLOAD</div><h2>Сообщение</h2><p>Зашифровано<br>AES-256-GCM</p></article>
+    <article class="card" data-node="lock"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><div class="tag">TLS + ПИННИНГ</div><h2>Шифрование</h2><p>Ключ знают<br>только участники</p></article>
+  </div>
+  <div class="caption"><span class="number" id="step-number">01</span><p id="caption">Два компьютера в одной сети запускают мессенджер.</p></div>
+</section></div>
+</main>
+<footer class="toolbar" aria-label="Управление презентацией">
+  <div class="controls"><button id="previous" aria-label="Предыдущий шаг">←</button><span id="position" aria-live="polite">1 / 9</span><button id="next" aria-label="Следующий шаг">Далее →</button></div>
+  <nav class="steps" aria-label="Шаги сцены"></nav>
+  <div class="utilities"><button id="replay" title="Повторить сцену (R)">↺</button><button id="theme" title="Сменить тему (T)" aria-label="Сменить тему">◐</button><button id="fullscreen" title="Полный экран (F)" aria-label="Полный экран">⛶</button><button id="help" title="Управление (?)" aria-label="Показать управление">?</button></div>
+</footer>
+<dialog id="help-dialog"><h2>Управление</h2><p><kbd>→</kbd> или <kbd>Пробел</kbd> — следующий шаг.<br><kbd>←</kbd> — предыдущий шаг.<br><kbd>Home</kbd> / <kbd>End</kbd> — начало / конец.<br><kbd>R</kbd> — повторить сборку.<br><kbd>T</kbd> — тема. <kbd>F</kbd> — полный экран.<br><kbd>Esc</kbd> — закрыть это окно.</p><p>На сенсорном экране доступны кнопки и горизонтальные свайпы. Демонстрационная схема рассчитана на большой экран или альбомную ориентацию.</p><button id="close-help">Закрыть</button></dialog>
+<div id="status" class="sr-only" role="status"></div>
+<script>
+(() => {
+'use strict';
+// LAN Messenger demo: one continuous scene, stable node identities.
+const W = 1600, H = 900;
+const KEYS = ['pcA','pcB','hub','msg','lock'];
+// Node poses: [x, y, scale, opacity]. Cards are 280x148 logical units before scale.
+const PCA = [150,520,1,1], PCB = [1170,520,1,1];
+const HUB_OFF = [660,300,1,0], HUB_ON = [660,300,1,1];
+const MSG_HIDDEN = [170,425,.7,0], MSG_HUB = [475,330,.7,1], MSG_B = [1250,425,.7,1];
+const LOCK_OFF = [745,548,.7,0], LOCK_CHAN = [745,548,.7,1], LOCK_HUB = [740,490,.85,1];
+const STEPS = [
+  {name:'Два компьютера в сети',caption:'Офисная сеть: Аня и Борис запустили LAN Messenger. Ни серверов, ни аккаунтов — один и тот же exe на двух машинах.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_OFF,msg:MSG_HIDDEN,lock:LOCK_OFF},edges:[0,0,0],camera:[800,470,1]},
+  {name:'Обнаружение по UDP',caption:'Каждый узел рассылает announce в broadcast (UDP 45677). Узлы находят друг друга и появляются в списке контактов.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_OFF,msg:MSG_HIDDEN,lock:LOCK_OFF},edges:[1,0,0],camera:[800,470,1]},
+  {name:'Прямой канал TCP + TLS',caption:'Между компьютерами поднимается постоянный TCP-канал (порт 45678) с TLS и пиннингом отпечатка сертификата.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_OFF,msg:MSG_HIDDEN,lock:LOCK_CHAN},edges:[1,0,0],camera:[800,470,1]},
+  {name:'Сообщение напрямую',caption:'В локальной сети сообщение летит напрямую от Ани к Борису — без посредников, с подтверждением доставки.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_OFF,msg:MSG_B,lock:LOCK_CHAN},edges:[1,0,0],camera:[800,470,1]},
+  {name:'А если друг за NAT?',caption:'Через интернет прямого пути нет — прямой канал гаснет. Оба клиента подключаются к хабу и вступают в общую комнату с общим паролем.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_ON,msg:MSG_HIDDEN,lock:LOCK_OFF},edges:[0,1,1],camera:[800,470,1]},
+  {name:'Реле: клиент → хаб',caption:'Аня пишет в комнату: зашифрованное сообщение уходит на хаб. Хаб видит только шифротекст.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_ON,msg:MSG_HUB,lock:LOCK_OFF},edges:[0,1,1],camera:[800,470,1]},
+  {name:'Реле: хаб → участники',caption:'Хаб пересылает сообщение участникам комнаты. Борис получает его и расшифровывает ключом комнаты.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_ON,msg:MSG_B,lock:LOCK_OFF},edges:[0,1,1],camera:[800,470,1]},
+  {name:'Приближаем шифрование',caption:'Камера приближает хаб: ключ комнаты (AES-256-GCM) знают только участники — релей читать не может.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_ON,msg:MSG_B,lock:LOCK_HUB},edges:[0,1,1],camera:[800,400,1.15]},
+  {name:'Вся схема целиком',caption:'Локальная сеть — напрямую, интернет — через хаб-комнаты. Один exe, ноль настройки у пользователя.',nodes:{pcA:PCA,pcB:PCB,hub:HUB_ON,msg:MSG_B,lock:LOCK_CHAN},edges:[1,1,1],camera:[800,470,1]}
+];
+const $ = selector => document.querySelector(selector);
+const clamp = (value,min,max) => Math.min(max,Math.max(min,value));
+const mix = (a,b,t) => a+(b-a)*t;
+const easeIO = t => t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
+const easeOut = t => 1-Math.pow(1-t,3);
+const clone = value => JSON.parse(JSON.stringify(value));
+const motionPreference = matchMedia('(prefers-reduced-motion: reduce)');
+const stage = $('.stage'), world = $('.world');
+const cards = Object.fromEntries(KEYS.map(key=>[key,$(`[data-node="${key}"]`)]));
+const connections = [['pcA','pcB'],['pcA','hub'],['hub','pcB']].map(([from,to])=>({from,to,path:$(`[data-edge="${from}-${to}"]`),packet:$(`[data-packet="${from}-${to}"]`)}));
+const deckId = $('meta[name="deck-id"]').content;
+const storageKey = `html-motion:${deckId}`;
+let index = 0, display = clone(STEPS[0]), transition = null, raf = 0;
+let printState = null;
+const readSaved = suffix => {try{return localStorage.getItem(`${storageKey}:${suffix}`)}catch{return null}};
+const save = (suffix,value) => {try{localStorage.setItem(`${storageKey}:${suffix}`,String(value))}catch{/* Storage is optional for file:// and sandboxed views. */}};
+const stepButtons = STEPS.map((step,i)=>{
+  const button = document.createElement('button');
+  button.setAttribute('aria-label',`${i+1}. ${step.name}`);
+  button.addEventListener('click',()=>go(i));
+  $('.steps').append(button);
+  return button;
+});
+
+function anchor(node,other) {
+  const [x,y,s] = node, [ox,oy,os] = other;
+  const cx=x+140*s,cy=y+74*s,dx=ox+140*os-cx,dy=oy+74*os-cy;
+  if(Math.abs(dx)>Math.abs(dy))return {x:cx+Math.sign(dx)*140*s,y:cy,axis:'x',dir:Math.sign(dx)};
+  return {x:cx,y:cy+Math.sign(dy)*74*s,axis:'y',dir:Math.sign(dy)};
+}
+
+function draw(time=0) {
+  for(const key of KEYS){
+    const [x,y,s,opacity]=display.nodes[key],el=cards[key];
+    el.style.transform=`translate(${x}px,${y}px) scale(${s})`;
+    el.style.opacity=opacity;
+    el.inert=opacity<.01;
+    el.setAttribute('aria-hidden',String(opacity<.01));
+  }
+  const [cx,cy,z]=display.camera;
+  world.style.transform=`translate(${W/2-cx*z}px,${H/2-cy*z}px) scale(${z})`;
+  connections.forEach((edge,i)=>{
+    const from=display.nodes[edge.from],to=display.nodes[edge.to];
+    const a=anchor(from,to),b=anchor(to,from),k=Math.min(Math.hypot(b.x-a.x,b.y-a.y)*.45,220);
+    const ax=a.x+(a.axis==='x'?a.dir*k:0),ay=a.y+(a.axis==='y'?a.dir*k:0);
+    const bx=b.x+(b.axis==='x'?b.dir*k:0),by=b.y+(b.axis==='y'?b.dir*k:0);
+    edge.path.setAttribute('d',`M${a.x} ${a.y}C${ax} ${ay} ${bx} ${by} ${b.x} ${b.y}`);
+    const length=edge.path.getTotalLength(),reveal=display.edges[i];
+    edge.path.style.strokeDasharray=`${length} ${length+1}`;
+    edge.path.style.strokeDashoffset=length*(1-reveal);
+    edge.path.style.opacity=Math.min(from[3],to[3],reveal);
+    const point=edge.path.getPointAtLength(((time/1900+i*.29)%1)*length);
+    edge.packet.setAttribute('cx',point.x);edge.packet.setAttribute('cy',point.y);
+    edge.packet.style.opacity=motionPreference.matches||reveal<.99?0:Math.min(from[3],to[3]);
+  });
+}
+
+function schedule(){if(!raf)raf=requestAnimationFrame(tick)}
+function tick(now){
+  raf=0;
+  if(transition){
+    const {from,to,start}=transition,elapsed=now-start,t=clamp(elapsed/1500,0,1);
+    for(const [i,key] of KEYS.entries()){
+      const entering=from.nodes[key][3]<.01&&to.nodes[key][3]>.01;
+      const leaving=from.nodes[key][3]>.01&&to.nodes[key][3]<.01;
+      const local=clamp((elapsed-(entering?i*120:0))/1400,0,1);
+      const opacityLocal=leaving?clamp(elapsed/400,0,1):local;
+      const positionT=entering?easeOut(local):easeIO(local);
+      display.nodes[key]=from.nodes[key].map((value,j)=>mix(value,to.nodes[key][j],j===3?easeOut(opacityLocal):positionT));
+    }
+    display.camera=from.camera.map((value,j)=>mix(value,to.camera[j],easeIO(t)));
+    display.edges=from.edges.map((value,j)=>mix(value,to.edges[j],easeIO(clamp((elapsed-200)/1100,0,1))));
+    if(t===1){display=clone(to);transition=null}
+  }
+  draw(now);
+  if(!document.hidden&&(transition||(!motionPreference.matches&&display.edges.some(x=>x>.99))))schedule();
+}
+
+function go(value,{instant=false,write=true,replay=false}={}){
+  const number=Number(value);index=clamp(Number.isFinite(number)?Math.round(number):0,0,STEPS.length-1);
+  if(replay){display=clone(STEPS[0]);KEYS.forEach(key=>{display.nodes[key][1]+=24;display.nodes[key][3]=0})}
+  // A single transition interpolates from the visible state, including interruptions.
+  if(instant||motionPreference.matches){transition=null;display=clone(STEPS[index]);draw()}
+  else transition={from:clone(display),to:clone(STEPS[index]),start:performance.now()};
+  stage.dataset.step=index;
+  $('#step-name').textContent=STEPS[index].name;
+  $('#caption').textContent=STEPS[index].caption;
+  $('#step-number').textContent=String(index+1).padStart(2,'0');
+  $('#position').textContent=`${index+1} / ${STEPS.length}`;
+  $('#previous').disabled=index===0;$('#next').disabled=index===STEPS.length-1;
+  stepButtons.forEach((button,i)=>{if(i===index)button.setAttribute('aria-current','step');else button.removeAttribute('aria-current')});
+  if(write){try{history.replaceState(null,'',`#step=${index+1}`)}catch{/* The scene also works without History API access. */}}
+  save('step',index);schedule();
+}
+
+function fit(){
+  const viewport=$('.viewport'),scale=Math.min(viewport.clientWidth/W,viewport.clientHeight/H);
+  $('.frame').style.width=`${W*scale}px`;$('.frame').style.height=`${H*scale}px`;
+  stage.style.transform=`scale(${scale})`;
+}
+function toggleTheme(){const theme=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=theme;save('theme',theme)}
+async function toggleFullscreen(){try{if(document.fullscreenElement)await document.exitFullscreen();else if(document.documentElement.requestFullscreen)await document.documentElement.requestFullscreen();else $('#status').textContent='Полноэкранный режим недоступен в этом браузере.'}catch{$('#status').textContent='Браузер не разрешил полный экран.'}}
+function fromHash(){const match=/^#step=(\d+)$/.exec(location.hash);return match?Number(match[1])-1:null}
+$('#previous').addEventListener('click',()=>go(index-1));$('#next').addEventListener('click',()=>go(index+1));
+$('#replay').addEventListener('click',()=>go(0,{replay:true}));$('#theme').addEventListener('click',toggleTheme);$('#fullscreen').addEventListener('click',toggleFullscreen);
+$('#help').addEventListener('click',()=>$('#help-dialog').showModal());$('#close-help').addEventListener('click',()=>$('#help-dialog').close());
+addEventListener('keydown',event=>{
+  if(event.metaKey||event.ctrlKey||event.altKey||event.target.closest('input,textarea,select,[contenteditable="true"]')||$('#help-dialog').open)return;
+  const key=event.key,code=event.code;
+  if(key==='ArrowRight'||key==='PageDown'||(key===' '&&!event.target.closest('button,a'))){event.preventDefault();go(index+1)}
+  else if(key==='ArrowLeft'||key==='PageUp'){event.preventDefault();go(index-1)}
+  else if(key==='Home'){event.preventDefault();go(0)}else if(key==='End'){event.preventDefault();go(STEPS.length-1)}
+  else if(code==='KeyR')go(0,{replay:true});else if(code==='KeyT')toggleTheme();else if(code==='KeyF')toggleFullscreen();
+  else if(key==='?'||code==='Slash'){event.preventDefault();$('#help-dialog').showModal()}
+});
+let pointer=null;
+$('.viewport').addEventListener('pointerdown',event=>{if(event.isPrimary)pointer={id:event.pointerId,x:event.clientX,y:event.clientY}});
+$('.viewport').addEventListener('pointerup',event=>{if(!pointer||pointer.id!==event.pointerId)return;const dx=event.clientX-pointer.x,dy=event.clientY-pointer.y;pointer=null;if(Math.abs(dx)>60&&Math.abs(dx)>Math.abs(dy)*1.4)go(index+(dx<0?1:-1))});
+$('.viewport').addEventListener('pointercancel',()=>{pointer=null});
+addEventListener('resize',fit);addEventListener('hashchange',()=>{const value=fromHash();if(value!==null)go(value,{instant:true,write:false})});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)schedule()});
+motionPreference.addEventListener('change',()=>go(index,{instant:true,write:false}));
+addEventListener('beforeprint',()=>{printState={display:clone(display),transition};transition=null;display=clone(STEPS[STEPS.length-1]);draw()});
+addEventListener('afterprint',()=>{if(printState){display=printState.display;transition=printState.transition;printState=null;draw();schedule()}});
+document.querySelectorAll('[data-deck-title]').forEach(el=>{el.textContent=document.title});
+const theme=readSaved('theme');if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme;
+fit();
+const hash=fromHash(),saved=readSaved('step');
+const initial=hash??(saved===null?0:Number(saved));
+go(initial,{instant:hash!==null||saved!==null,replay:hash===null&&saved===null});
+// Small authoring API: state is a copy, not a mutable source of truth.
+window.presentation=Object.freeze({go,next:()=>go(index+1),previous:()=>go(index-1),replay:()=>go(0,{replay:true}),get state(){return {step:index,total:STEPS.length,animating:Boolean(transition)}}});
+})();
+</script>
+</body>
+</html>

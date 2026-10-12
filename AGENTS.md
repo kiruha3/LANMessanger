@@ -7,8 +7,8 @@ P2P-мессенджер для LAN и прямых подключений че�
 - **Пуш — только по явной команде пользователя.** Коммитить можно, `git push` — нет.
 - **Каждое изменение фичи или поведения — обновлять CHANGELOG.md и документацию в том же коммите.** CHANGELOG: новая версия/пункт по шаблону «что изменилось для пользователя». Документация: затронутые места в README.md, `docs/ХАБ_инструкция.md`, `docs/СЕРВЕР.md` и вкладке «Помощь» (app/ui/help_tab.py) приводим в соответствие с тем, что реально делает код.
 - **При каждой сборке exe поднимать версию** в `app/__init__.py` (`__version__`) — версия видна в заголовке окна.
-- **Перед сборкой прогонять ВЕСЬ набор**: `demo_two_nodes.py`, `test_persistent.py`, `test_rooms.py`, `test_crypto.py`, `test_tls.py`, `test_ui_smoke.py` — все зелёные.
-- Сборка: `python -m PyInstaller --noconfirm --onefile --windowed --name LANMessenger main.py` → `dist\LANMessenger.exe`. Перед сборкой убивать запущенный exe (`taskkill //F //IM LANMessenger.exe`), иначе файл занят. После сборки запускать и проверять, что процесс жив.
+- **Перед сборкой прогонять ВЕСЬ набор**: `demo_two_nodes.py`, `test_persistent.py`, `test_rooms.py`, `test_crypto.py`, `test_tls.py`, `test_ui_smoke.py` — все зелёные. Запуск через `py -3.11` (голый `python` может резолвиться в 3.10 без PyQt6).
+- Сборка: `py -3.11 -m PyInstaller --noconfirm --onefile --windowed --name LANMessenger main.py` → `dist\LANMessenger.exe`. Перед сборкой убивать запущенный exe (`taskkill //F //IM LANMessenger.exe`), иначе файл занят. После сборки запускать и проверять, что процесс жив.
 - Убирать за тестами: `history.db`, `settings.json`, `messenger.pid`, `hub.crt`, `hub.key`, `images/`, `test_tmp_rooms/` в корне — рабочие данные, в git не идут (в `.gitignore`).
 - Коммит: `git -c user.name="kirill" -c user.email="kirill@localhost" commit`.
 
