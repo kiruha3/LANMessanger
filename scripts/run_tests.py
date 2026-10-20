@@ -15,6 +15,7 @@ TESTS = (
     "test_crypto.py",
     "test_tls.py",
     "test_ui_smoke.py",
+    "test_legacy_ack.py",
     "test_platform_support.py",
 )
 

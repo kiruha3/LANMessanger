@@ -76,13 +76,16 @@ class MessageServer:
 
     def _dispatch(self, pkt: dict, ip: str, conn: socket.socket):
         if pkt["type"] == "msg":
+            if self.on_message:
+                try:
+                    self.on_message(pkt, ip)
+                except Exception:
+                    return  # обработка/запись не удалась — подтверждать нечего
             ack = protocol.make_ack(self.name, pkt["id"])
             try:
                 conn.sendall(protocol.encode_frame(ack))
             except OSError:
                 pass
-            if self.on_message:
-                self.on_message(pkt, ip)
         elif pkt["type"] == "ack":
             if self.on_ack:
                 self.on_ack(pkt, ip)
