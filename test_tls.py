@@ -112,7 +112,9 @@ try:
     print("tls: known_fingerprints у A/B OK")
 
     # --- peek-ветка: старый plain-клиент до TLS-сервера ---
-    c = make_engine("C", 46803, 46813, [("127.0.0.1", 46801)], "tls_c.db")
+    # Проверяем plain -> TLS отдельно от UDP-автодозвона: иначе два встречных
+    # канала могут смениться по tie-break прямо во время первой отправки.
+    c = make_engine("C", 46803, 46813, [], "tls_c.db")
     c.set_tls_enabled(False)
     engines.append(c)
     c.start()
@@ -122,9 +124,9 @@ try:
              what="A не принял plain-сообщение от C")
     with a.connections._lock:
         pc_ac = a.connections.conns.get(C_KEY)
-    if pc_ac is not None:
-        assert not isinstance(pc_ac.sock, ssl.SSLSocket), \
-            "plain-клиент не должен оказаться в TLS"
+    assert pc_ac is not None, "A не сохранил канал plain-клиента"
+    assert not isinstance(pc_ac.sock, ssl.SSLSocket), \
+        "plain-клиент не должен оказаться в TLS"
     print("tls: peek-ветка, plain-клиент до TLS-сервера OK")
 
     # --- отдельная пара D/E без auto-connect: fingerprint + уведомление ---
