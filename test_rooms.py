@@ -109,10 +109,17 @@ try:
     a2 = make_engine("Alice", 46702, 46712, [("127.0.0.1", 46701)], "a.db")
     a2.start()
     wait_for(
-        lambda: "Alice" in (members_of(a2, HUB_KEY, ROOM, 0.1) or ()),
-        timeout=25.0, what="A2 не пере-join'ил комнату после перезапуска")
+        lambda: "Alice" in (members_of(a2, HUB_KEY, ROOM, 0.1) or ())
+        and "Alice" in (members_of(h, HUB_KEY, ROOM, 0.1) or ()),
+        timeout=25.0, what="A2 и хаб не восстановили состав комнаты после перезапуска")
     mh = members_of(h, HUB_KEY, ROOM, 0.1)
     assert "Alice" in mh, f"H: нет Alice после перезапуска: {mh}"
+    restored = h.send_room(HUB_KEY, ROOM, "сообщение после перезапуска")
+    assert restored.status == "delivered", f"H->A2: {restored.status}"
+    wait_for(lambda: any(m.direction == "in" and m.id == restored.id
+                         and m.text == "сообщение после перезапуска"
+                         for m in a2.chat(CHAT_KEY)),
+             what="A2 не получил новое сообщение от хаба после перезапуска")
     print("rooms: персистентность — A2 восстановил комнату из settings OK")
 
     a2.stop()

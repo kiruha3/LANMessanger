@@ -11,6 +11,7 @@
 """
 
 import json
+import faulthandler
 import os
 import shutil
 import ssl
@@ -139,6 +140,7 @@ try:
     engines += [d, e]
     d.start()
     e.start()
+    fingerprint_send_started = time.monotonic()
     m = d.send(E_KEY, "127.0.0.1", 46815, "проверка отпечатка")
     assert m.status == "delivered", f"D->E: {m.status}"
     assert d.known_fingerprints.get(E_KEY) == ROOT_FP, \
@@ -187,6 +189,24 @@ try:
     shutil.rmtree("test_tmp_rooms/tlscert2", ignore_errors=True)
     print("OK")
 except BaseException:
+    failed_message = locals().get("m")
+    failed_id = getattr(failed_message, "id", None)
+    started = locals().get("fingerprint_send_started")
+    elapsed = round(time.monotonic() - started, 3) if started else None
+    print(f"tls: last message id={failed_id}, "
+          f"status={getattr(failed_message, 'status', None)}, "
+          f"elapsed_since_D_send={elapsed}", flush=True)
+    for eng in engines:
+        with eng.connections._lock:
+            channels = [(key, pc.alive, pc.outbound, type(pc.sock).__name__, pc.peer_node)
+                        for key, pc in eng.connections.conns.items()]
+        with eng._lock:
+            received = any(msg.id == failed_id and msg.direction == "in"
+                           for messages in eng.chats.values() for msg in messages)
+        print(f"tls: failure state {eng.name}: node={eng.connections.node_id}, "
+              f"tls={eng.tls_enabled}, received_last_message={received}, "
+              f"channels={channels}, fingerprints={eng.known_fingerprints}", flush=True)
+    faulthandler.dump_traceback()
     for eng in engines:
         try:
             eng.stop()
