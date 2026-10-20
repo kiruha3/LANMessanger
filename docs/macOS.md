@@ -5,6 +5,20 @@ Windows остаётся portable-приложением `LANMessenger.exe`. Д�
 нативных тестов и сборок для каждой архитектуры видны в GitHub Actions. Автоматическая
 проверка запуска не заменяет проверку интерфейса и разрешений на настоящем Mac.
 
+## Скачать готовую версию
+
+В [экспериментальном релизе macOS 0.21.0](https://github.com/kiruha3/LANMessanger/releases/tag/v0.21.0-macos)
+доступны два архива:
+
+- [Apple Silicon (M-серия)](https://github.com/kiruha3/LANMessanger/releases/download/v0.21.0-macos/LANMessenger-0.21.0-macos-arm64.zip).
+- [Intel](https://github.com/kiruha3/LANMessanger/releases/download/v0.21.0-macos/LANMessenger-0.21.0-macos-x86_64.zip).
+
+Для скачивания из Releases вход в GitHub не требуется. Контрольные суммы архивов —
+в файле [SHA256SUMS.txt](https://github.com/kiruha3/LANMessanger/releases/download/v0.21.0-macos/SHA256SUMS.txt).
+Распакуйте архив и перенесите `LANMessenger.app` в «Программы»; ограничения первого
+запуска описаны ниже. Windows 0.20.0 остаётся стабильным релизом, её exe доступен
+по [прежней ссылке](https://github.com/kiruha3/LANMessanger/releases/latest/download/LANMessenger.exe).
+
 ## Что доступно
 
 Общий код обеспечивает обнаружение узлов в LAN, личные чаты, комнаты через хаб,
@@ -43,16 +57,15 @@ python scripts/build_macos.py
 
 ## GitHub Actions
 
-Подготовлен workflow `.github/workflows/build-macos.yml`, запускаемый **только вручную**.
-Он станет доступен после разрешённой пользователем отправки изменений в GitHub;
-до этого локальная подготовка ничего не запускает на GitHub.
+Workflow `.github/workflows/build-macos.yml` запускается **только вручную**.
 
 1. Откройте **Actions → Build macOS (experimental) → Run workflow**.
 2. Сначала выполняются регрессионные тесты на Windows без пересборки exe.
 3. При успехе macOS-задачи выполняют тесты, сборку и проверку старта на Apple Silicon и Intel.
 4. Скачайте нужный архив из **Artifacts** (`LANMessenger-macos-arm64` / `LANMessenger-macos-x86_64`).
 
-Артефакты хранятся 14 дней. Workflow имеет права только на чтение репозитория,
+Артефакты Actions хранятся 14 дней; готовые архивы в Releases доступны отдельно.
+Workflow имеет права только на чтение репозитория,
 не создаёт релизов, не отправляет коммитов и не меняет сервер-хаб.
 
 ## Запуск и данные

@@ -8,7 +8,10 @@ P2P-мессенджер для локальной сети и прямых по
 
 Дополнительно подготовлен экспериментальный вариант для **macOS** — отдельное приложение
 `LANMessenger.app` для Apple Silicon и Intel. Сборка и автоматические проверки выполняются
-на macOS отдельно для каждой архитектуры. Инструкция и ограничения: [macOS](docs/macOS.md).
+на macOS отдельно для каждой архитектуры. [Скачать macOS 0.21.0](https://github.com/kiruha3/LANMessanger/releases/tag/v0.21.0-macos).
+Инструкция и ограничения: [macOS](docs/macOS.md).
+
+[Скачать стабильную Windows-версию](https://github.com/kiruha3/LANMessanger/releases/latest/download/LANMessenger.exe).
 
 ## Возможности
 
