@@ -6,6 +6,10 @@ P2P-мессенджер для локальной сети и прямых по
 
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
 
+Дополнительно подготовлен экспериментальный вариант для **macOS** — отдельное приложение
+`LANMessenger.app` для Apple Silicon и Intel. Сборка выполняется на macOS; первый нативный
+прогон ещё предстоит. Инструкция и ограничения: [macOS](docs/macOS.md).
+
 ## Возможности
 
 - **Обнаружение участников автоматически** (UDP broadcast в LAN) — список контактов по IP
@@ -58,27 +62,37 @@ P2P-мессенджер для локальной сети и прямых по
 ## Запуск из исходников
 
 ```bash
-pip install PyQt6
-python main.py            # GUI
-python main.py --console  # консольный режим
-python main.py --multi    # второй экземпляр (для тестов)
+py -3.11 -m pip install -r requirements.txt
+py -3.11 main.py            # GUI
+py -3.11 main.py --console  # консольный режим
+py -3.11 main.py --multi    # второй экземпляр (для тестов)
 ```
 
-Сборка exe:
+На macOS используйте `python3.11` вместо `py -3.11`. Запуск из исходников хранит
+рабочие данные в текущей папке; установленная macOS `.app` — в Application Support.
+
+Сборка Windows exe (перед каждой сборкой поднять `__version__` в `app/__init__.py`):
 
 ```bash
-pip install pyinstaller
-python -m PyInstaller --noconfirm --onefile --windowed --name LANMessenger main.py
+py -3.11 -m pip install -r requirements-build.txt
+py -3.11 scripts/run_tests.py
+py -3.11 -m PyInstaller --noconfirm --onefile --windowed --name LANMessenger main.py
 # результат: dist\LANMessenger.exe
 ```
+
+Перед пересборкой остановите запущенный exe и сохраните предыдущий рабочий файл отдельно.
+После сборки проверьте, что приложение запускается. macOS использует собственный
+`packaging/macos/LANMessenger.spec` и каталог `dist/macos/`, Windows exe не перезаписывается.
 
 ## Тесты
 
 ```bash
-python demo_two_nodes.py    # протокол, discovery, доставка
-python test_persistent.py   # постоянные соединения, обмен при «закрытом» порте
-python test_ui_smoke.py     # UI (offscreen)
+py -3.11 scripts/run_tests.py
 ```
+
+Полный набор: `demo_two_nodes.py`, `test_persistent.py`, `test_rooms.py`, `test_crypto.py`,
+`test_tls.py`, `test_ui_smoke.py`, `test_platform_support.py`. Каждый скрипт запускается
+в отдельной временной папке; история и настройки пользователей не меняются.
 
 ## Структура
 
@@ -115,6 +129,6 @@ app/
 
 ## Замечания по безопасности
 
-- Сообщения в канале не шифруются — для чувствительного трафика используйте доверенную сеть/VPN (шифрование в планах ТЗ).
+- TLS включён по умолчанию, отпечатки узлов запоминаются. Общий сетевой пароль добавляет PSK-шифрование личных сообщений, пароль комнаты — шифрование содержимого комнаты.
 - RDP-трафик в туннеле шифруется самой Windows (NLA).
 - Приложение не отправляет ничего за пределы заданных узлов; телеметрии и облаков нет.

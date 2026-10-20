@@ -1,7 +1,9 @@
 __pycache__/
+.venv/
 build/
 dist/
 *.spec
+!packaging/macos/LANMessenger.spec
 settings.json
 history.db
 hub.crt

@@ -1,4 +1,4 @@
-"""Локальная история переписки — один файл history.db (SQLite) рядом с приложением."""
+"""Локальная история: portable на Windows, Application Support в macOS .app."""
 
 import json
 import os
@@ -9,6 +9,11 @@ import threading
 
 def base_dir() -> str:
     if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            folder = os.path.join(os.path.expanduser("~"), "Library",
+                                  "Application Support", "LANMessenger")
+            os.makedirs(folder, exist_ok=True)
+            return folder
         return os.path.dirname(sys.executable)
     return os.getcwd()
 

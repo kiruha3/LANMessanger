@@ -7,6 +7,7 @@ stream до узла. Принимающая сторона: подключае�
 
 import base64
 import socket
+import sys
 import threading
 
 from ..net import protocol
@@ -19,6 +20,8 @@ OPEN_TIMEOUT = 6.0
 
 def _active_console_session() -> int:
     """ID активной консольной сессии Windows (без парсинга query session)."""
+    if sys.platform != "win32":
+        raise OSError("Windows console sessions are unavailable on this platform")
     import ctypes
 
     sid = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId()

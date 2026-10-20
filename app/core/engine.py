@@ -1,6 +1,7 @@
 import collections
 import json
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -92,7 +93,8 @@ class Engine:
         self.discovery.on_node_update = self._auto_connect
         self.theme = "light"
         self.push: PushServer | None = None
-        self.rdp_enabled = True
+        self.rdp_enabled = sys.platform != "darwin"
+        self.tunnel.enabled = self.rdp_enabled
         self.scan_enabled = False  # сканер — по свитчу
         self.shadow_rdp = False  # RDP: совместный сеанс (shadow) — по умолчанию выкл
         self.sort_mode = "status"  # status | name | ip
@@ -943,6 +945,9 @@ class Engine:
 
     def set_feature(self, name: str, on: bool):
         """Фичефлаг: rdp_enabled / scan_enabled."""
+        if sys.platform == "darwin" and name in {
+                "rdp_enabled", "shadow_rdp", "scan_enabled"}:
+            on = False
         setattr(self, name, bool(on))
         if name == "rdp_enabled":
             self.tunnel.enabled = bool(on)
@@ -1093,8 +1098,10 @@ class Engine:
         self.connections.accept_all = bool(data.get("accept_all", False))
         self.theme = str(data.get("theme", "light"))
         self.set_feature("rdp_enabled", bool(data.get("rdp_enabled", True)))
-        self.scan_enabled = bool(data.get("scan_enabled", False))
-        self.shadow_rdp = bool(data.get("shadow_rdp", False))
+        self.scan_enabled = (sys.platform != "darwin"
+                             and bool(data.get("scan_enabled", False)))
+        self.shadow_rdp = (sys.platform != "darwin"
+                           and bool(data.get("shadow_rdp", False)))
         self.sort_mode = str(data.get("sort_mode", "status"))
         self.muted_chats = {str(k) for k in (data.get("muted_chats") or [])}
         self.manual_ip_enabled = bool(data.get("manual_ip_enabled", False))

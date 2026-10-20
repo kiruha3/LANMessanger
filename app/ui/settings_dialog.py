@@ -1,3 +1,5 @@
+import sys
+
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -21,6 +23,8 @@ TS_KEY = r"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
 def set_shadow_policy(enabled: bool) -> bool:
     """Shadow=2 (теневое с согласием) / Shadow=0 (запрещено).
     Запуск через runas — Windows покажет UAC."""
+    if sys.platform != "win32":
+        return False
     import ctypes
 
     value = 2 if enabled else 0
@@ -121,6 +125,17 @@ class SettingsDialog(QDialog):
         fl.addWidget(self.notify_box)
         fl.addWidget(self.test_btn)
 
+        if sys.platform == "darwin":
+            self.autostart_box.setText("Автозапуск (только Windows)")
+            for control in (self.autostart_box, self.rdp_box, self.shadow_box,
+                            self.shadow_btn, self.scan_box):
+                control.setEnabled(False)
+                control.setToolTip("Недоступно в экспериментальной версии для macOS")
+            note = QLabel("macOS: RDP, автозапуск и сканер сети пока недоступны. "
+                          "Автоматическое обнаружение мессенджеров работает отдельно.")
+            note.setWordWrap(True)
+            fl.addWidget(note)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self._apply)
 
@@ -153,6 +168,9 @@ class SettingsDialog(QDialog):
                                 "смотрите колокольчик 🔔 справа вверху.")
 
     def _shadow_btn_update(self):
+        if sys.platform == "darwin":
+            self.shadow_btn.setText("Совместное подключение доступно в Windows")
+            return
         from ..core.tunnel import _shadow_allowed
 
         if _shadow_allowed():
@@ -182,10 +200,11 @@ class SettingsDialog(QDialog):
 
     def _apply(self):
         engine = self.engine
-        if self.autostart_box.isChecked():
-            autostart.enable()
-        else:
-            autostart.disable()
+        if sys.platform == "win32":
+            if self.autostart_box.isChecked():
+                autostart.enable()
+            else:
+                autostart.disable()
 
         engine.set_accept_all(self.acceptall_box.isChecked())
         if hasattr(engine, "set_tls_enabled"):
