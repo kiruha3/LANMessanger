@@ -213,11 +213,15 @@ class MainWindow(QMainWindow):
 
         from .calendar_window import CalendarWindow
         from .help_tab import HelpTab
+        from .ai_tab import AITab
 
         self.tabs = QTabWidget()
         self.tabs.addTab(splitter, "Чаты")
         self.tabs.addTab(CalendarWindow(engine), "Календарь")
+        self.ai_tab = AITab(self)
+        self.tabs.addTab(self.ai_tab, "ИИ")
         self.tabs.addTab(HelpTab(), "Помощь")
+        QApplication.instance().aboutToQuit.connect(self.ai_tab.shutdown)
         self.tabs.tabBar().hide()  # вкладки переключаются кнопками верхней панели
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -240,7 +244,7 @@ class MainWindow(QMainWindow):
         self._nav_buttons = []
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
-        for i, label in enumerate(("Чаты", "Календарь", "Помощь")):
+        for i, label in enumerate(("Чаты", "Календарь", "ИИ", "Помощь")):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.clicked.connect(
