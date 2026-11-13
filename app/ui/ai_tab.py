@@ -71,6 +71,9 @@ class AITab(QWidget):
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self._save)
+        self._connection_save_timer = QTimer(self)
+        self._connection_save_timer.setSingleShot(True)
+        self._connection_save_timer.timeout.connect(self._persist_connection)
 
         self.folder_label = QLabel(f"Рабочая папка: {self.work_dir}")
         self.folder_label.setWordWrap(True)
@@ -101,6 +104,8 @@ class AITab(QWidget):
         self.key.setPlaceholderText("API-ключ; для входа по аккаунту оставьте пустым")
         self.remember = QCheckBox("Сохранить API-ключ средствами Windows")
         self.remember.setEnabled(os.name == "nt")
+        self.connection_status = QLabel("Настройки подключения сохраняются автоматически.")
+        self.connection_status.setWordWrap(True)
         self.endpoint = QLineEdit()
         self.endpoint.setPlaceholderText("https://server/v1 — для совместимого API")
         self.runtime = QLineEdit()
@@ -139,6 +144,7 @@ class AITab(QWidget):
         form.addRow("Модель", self.model)
         form.addRow("API-ключ", self.key)
         form.addRow("", self.remember)
+        form.addRow("", self.connection_status)
         form.addRow("Адрес API", self.endpoint)
         form.addRow("Runtime", runtime_row)
         form.addRow(buttons)
@@ -206,6 +212,7 @@ class AITab(QWidget):
         self.endpoint.textChanged.connect(self._connection_changed)
         self.runtime.textChanged.connect(self._connection_changed)
         self.key.textChanged.connect(self._connection_changed)
+        self.remember.toggled.connect(self._schedule_connection_save)
         self._last_provider = self.provider.currentData()
         if not self.store.chats:
             self.store.new_chat(self.work_dir)
@@ -254,6 +261,20 @@ class AITab(QWidget):
     def _connection_changed(self, *_args):
         if not self.rpc.busy and not self._pending:
             self.rpc.shutdown()
+        self._schedule_connection_save()
+
+    def _schedule_connection_save(self, *_args):
+        if self.store and not self._closed:
+            self.connection_status.setText("Сохранение подключения…")
+            self._connection_save_timer.start(300)
+
+    def _persist_connection(self):
+        if not self.store:
+            return
+        try:
+            self._save_connection()
+        except (OSError, ValueError) as exc:
+            self.connection_status.setText(f"Не удалось сохранить подключение: {exc}")
 
     def _provider_changed(self):
         self.key.clear()
@@ -282,6 +303,7 @@ class AITab(QWidget):
                 self.status.setText(f"Не удалось сохранить историю ИИ: {exc}")
 
     def _save_connection(self):
+        self._connection_save_timer.stop()
         config = self._config()
         self.store.config.update(config)
         key = self.key.text().strip()
@@ -290,6 +312,10 @@ class AITab(QWidget):
         elif not self.remember.isChecked():
             self.vault.clear()
         self.store.save()
+        self.connection_status.setText(
+            "Подключение и API-ключ сохранены средствами Windows."
+            if self.remember.isChecked() and key else
+            "Подключение сохранено. API-ключ — только до выхода из приложения.")
         return config
 
     def _send(self):
@@ -624,6 +650,10 @@ class AITab(QWidget):
         self.auth_info.setText("Вход отменён.")
 
     def shutdown(self):
+        if self._closed:
+            return
+        self._connection_save_timer.stop()
+        self._persist_connection()
         self._closed = True
         self._render_timer.stop()
         self._save_timer.stop()

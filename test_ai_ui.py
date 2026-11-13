@@ -25,6 +25,45 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows DPAPI")
+    def test_connection_and_key_survive_restart_without_sending(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+            tab.endpoint.setText("https://example.invalid/v1")
+            tab.model.setEditText("test-model")
+            tab.key.setText("synthetic-test-key")
+            tab.remember.setChecked(True)
+            tab.shutdown()
+            tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertEqual(restored.provider.currentData(), "lanmessenger-api")
+                self.assertEqual(restored.endpoint.text(), "https://example.invalid/v1")
+                self.assertEqual(restored.model.currentText(), "test-model")
+                self.assertEqual(restored.key.text(), "synthetic-test-key")
+                self.assertTrue(restored.remember.isChecked())
+            finally:
+                restored.shutdown()
+                restored.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows DPAPI")
+    def test_remember_toggle_saves_and_removes_key_without_sending(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("openai"))
+                tab.key.setText("synthetic-test-key")
+                tab.remember.setChecked(True)
+                wait_for(lambda: tab.vault.path.exists())
+                self.assertEqual(tab.vault.load().get("key"), "synthetic-test-key")
+                tab.remember.setChecked(False)
+                wait_for(lambda: not tab.vault.path.exists())
+                self.assertEqual(tab.key.text(), "synthetic-test-key")
+            finally:
+                tab.shutdown()
+                tab.close()
+
     def test_only_supported_account_login_is_offered(self):
         with tempfile.TemporaryDirectory() as root:
             tab = AITab(data_dir=root, work_dir=root)
