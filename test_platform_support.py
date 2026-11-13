@@ -89,6 +89,55 @@ class PlatformUITests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_restore_from_tray_setting_is_opt_in_and_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp, engine_in(Path(tmp),'win32') as engine:
+            self.assertFalse(engine.open_on_message)
+            dialog=SettingsDialog(None,engine)
+            try:
+                dialog.open_message_box.setChecked(True)
+                with patch('app.ui.settings_dialog.autostart.enable'), patch('app.ui.settings_dialog.autostart.disable'), patch('app.ui.settings_dialog.theme.apply'):
+                    dialog._apply()
+                engine.open_on_message=False
+                engine.load_settings()
+                self.assertTrue(engine.open_on_message)
+            finally:
+                dialog.close()
+
+    def test_restore_from_tray_on_message_respects_setting_and_mute(self):
+        from app.ui.main_window import MainWindow
+        with tempfile.TemporaryDirectory() as tmp, engine_in(Path(tmp),'win32') as engine:
+            window=MainWindow(engine)
+            key='127.0.0.1:45678'
+            engine.chats[key]=[ChatMessage('incoming','in','Peer','hello',1)]
+            engine.unread[key]=1
+            try:
+                window.hide()
+                with patch.object(window,'_show_from_tray') as show, patch.object(window,'select_chat') as select, patch('app.ui.main_window.QApplication.beep'):
+                    window._on_new_message(key)
+                    show.assert_not_called()
+                    engine.open_on_message=True
+                    window._on_new_message(key)
+                    show.assert_called_once(); select.assert_called_once_with(key)
+                    show.reset_mock(); select.reset_mock()
+                    window.show()
+                    window._on_new_message(key)
+                    show.assert_not_called(); select.assert_not_called()
+                    window.showMinimized()
+                    window._on_new_message(key)
+                    show.assert_called_once(); select.assert_called_once_with(key)
+                    show.reset_mock(); select.reset_mock()
+                    window.hide()
+                    window.mute_action.setChecked(True)
+                    window._on_new_message(key)
+                    show.assert_not_called()
+                    window.mute_action.setChecked(False)
+                    engine.muted_chats.add(key)
+                    window._on_new_message(key)
+                    show.assert_not_called()
+            finally:
+                window.ai_tab.shutdown()
+                window._quitting=True; window.tray.hide(); window.close()
+
     def test_general_settings_have_scrollable_zones_and_fixed_ok_button(self):
         from PyQt6.QtCore import QPoint
         from PyQt6.QtGui import QFont

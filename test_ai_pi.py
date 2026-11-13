@@ -38,7 +38,7 @@ class LocalAPI(BaseHTTPRequestHandler):
         self.end_headers()
         if not any(m.get("role") == "tool" for m in request["messages"]):
             delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_write", "type": "function",
-                     "function": {"name": "write", "arguments": json.dumps({"path": "agent-proof.txt", "content": "created by real Pi"})}}]}
+                     "function": {"name": getattr(self.server, 'tool_name', 'write'), "arguments": json.dumps(getattr(self.server, 'tool_arguments', {"path": "agent-proof.txt", "content": "created by real Pi"}))}}]}
             reason = "tool_calls"
         else:
             delta = {"role": "assistant", "content": "Файл создан локальным агентом."}
@@ -51,6 +51,34 @@ class LocalAPI(BaseHTTPRequestHandler):
 
 
 class RealPiTests(unittest.TestCase):
+    def test_real_pi_bash_runs_with_prepared_environment(self):
+        try:
+            program, cli, _module = runtime_command()
+        except ValueError as exc:
+            self.skipTest(str(exc))
+        with tempfile.TemporaryDirectory() as root:
+            server = ThreadingHTTPServer(('127.0.0.1', 0), LocalAPI)
+            server.requests = []
+            server.tool_name = 'bash'
+            server.tool_arguments = {'command':'printf bash-ok > bash-proof.txt; git --version; rg --version; fd --version'}
+            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+            rpc = PiProcess(); events, errors = [], []
+            rpc.received.connect(events.append); rpc.error.connect(errors.append)
+            config = {'provider':'lanmessenger-api', 'model':'test-model', 'endpoint':f'http://127.0.0.1:{server.server_port}/v1'}
+            env = prepare_environment(Path(root), config, 'local-test-key')
+            try:
+                rpc.start(program, cli + ['--mode','rpc','--provider','lanmessenger-api','--model','test-model','--session',str(Path(root,'bash-session.jsonl')),'--no-extensions','--no-skills'], root, env)
+                wait_for(lambda: rpc.ready or errors)
+                self.assertEqual(errors, [])
+                rpc.send_prompt('Check the shell')
+                wait_for(lambda: any(e.get('type') == 'agent_end' for e in events) or errors)
+                self.assertEqual(errors, [])
+                tool = next(e for e in events if e.get('type') == 'tool_execution_end')
+                self.assertFalse(tool.get('isError'), str(tool))
+                self.assertEqual(Path(root,'bash-proof.txt').read_text(), 'bash-ok')
+            finally:
+                rpc.shutdown(); server.shutdown(); server.server_close(); thread.join(timeout=2)
+
     def test_real_pi_writes_file_and_restores_session_without_replay(self):
         try:
             program, cli, _module = runtime_command()

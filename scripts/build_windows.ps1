@@ -8,7 +8,9 @@ $taskOriginalPath = $env:PATH
 Push-Location $taskRepo
 try {
     $env:PATH = @((Split-Path $taskPython -Parent), "$env:SystemRoot\System32", $env:SystemRoot) -join ';'
-    & $taskPython -m PyInstaller --clean --noconfirm --onefile --windowed --name LANMessenger --add-data 'app/core/ai_auth.mjs;app/core' --add-data 'app/data/ai_catalog.json;app/data' --add-data 'licenses/bb-MIT.txt;licenses' --add-data 'THIRD_PARTY_NOTICES.md;.' main.py
+    & $taskPython scripts/generate_icon.py
+    if ($LASTEXITCODE -ne 0) { throw 'Icon generation failed' }
+    & $taskPython -m PyInstaller --clean --noconfirm --onefile --windowed --name LANMessenger --icon 'build/LANMessenger.ico' --add-data 'app/core/ai_auth.mjs;app/core' --add-data 'app/data/ai_catalog.json;app/data' --add-data 'licenses/bb-MIT.txt;licenses' --add-data 'THIRD_PARTY_NOTICES.md;.' main.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed: $LASTEXITCODE" }
     New-Item -ItemType Directory -Path (Join-Path $taskRepo 'dist/licenses') -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $taskRepo 'licenses/bb-MIT.txt') -Destination (Join-Path $taskRepo 'dist/licenses/bb-MIT.txt')

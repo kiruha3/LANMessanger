@@ -9,7 +9,7 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
-    QSplitter, QVBoxLayout, QWidget,
+    QProgressBar, QSplitter, QVBoxLayout, QWidget,
 )
 
 from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINKING_LEVELS,
@@ -17,6 +17,7 @@ from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINK
 from ..core.history import base_dir
 from ..core.ai_timeline import Timeline, restore_messages
 from ..core.ai_catalog import APIModelCatalog
+from ..core.ai_installer import RuntimeInstaller, runtime_environment, supported
 from .ai_transcript import AITranscript
 
 
@@ -54,6 +55,8 @@ class AITab(QWidget):
         self._logging_in = False
         self._stopped = False
         self._closed = False
+        self.installer = None
+        self._installing = False
         self.rpc = PiProcess(self)
         self.rpc.received.connect(self._event)
         self.rpc.error.connect(self._error)
@@ -185,6 +188,26 @@ class AITab(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.addWidget(self.folder_label)
+        self.install_panel = QWidget()
+        install_layout = QVBoxLayout(self.install_panel)
+        install_layout.setContentsMargins(0, 0, 0, 0)
+        self.install_info = QLabel('Для локального агента нужны компоненты ИИ. Установите их одной кнопкой: Node.js, Pi, Git Bash и инструменты поиска. Нужен интернет; файлы сохраняются в профиле Windows.')
+        self.install_info.setWordWrap(True)
+        install_layout.addWidget(self.install_info)
+        self.install_progress = QProgressBar()
+        self.install_progress.hide()
+        install_layout.addWidget(self.install_progress)
+        install_buttons = QHBoxLayout()
+        self.install_btn = QPushButton('Установить компоненты ИИ')
+        self.install_btn.setEnabled(supported())
+        self.install_btn.clicked.connect(self._install_runtime)
+        self.install_cancel = QPushButton('Отменить установку')
+        self.install_cancel.clicked.connect(self._cancel_install)
+        self.install_cancel.hide()
+        install_buttons.addWidget(self.install_btn)
+        install_buttons.addWidget(self.install_cancel)
+        install_layout.addLayout(install_buttons)
+        right_layout.addWidget(self.install_panel)
         right_layout.addWidget(self.connection_btn)
         right_layout.addWidget(self.connection_panel)
         right_layout.addWidget(self.output, 1)
@@ -237,6 +260,79 @@ class AITab(QWidget):
         self.chat_list.currentRowChanged.connect(self._select_chat)
         self._select_chat(0)
         self._provider_visibility()
+        self._check_runtime()
+
+    def _check_runtime(self):
+        try:
+            from ..core.ai_installer import runtime_folder, runtime_complete
+            managed = runtime_folder()
+            if managed.exists() and not runtime_complete(managed):
+                raise ValueError('incomplete managed runtime')
+            runtime_command(self.runtime.text())
+            # Include the shell check without writing provider settings.
+            if os.name == 'nt':
+                import shutil
+                from ..core.ai_installer import managed_shell
+                shells = [managed_shell(), Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git/bin/bash.exe']
+                if not any(p.is_file() for p in shells) and not shutil.which('bash'):
+                    raise ValueError('missing shell')
+        except (OSError, ValueError):
+            self.install_panel.show()
+        else:
+            self.install_panel.hide()
+
+    def _install_runtime(self):
+        if self._closed or (self.installer and self.installer.isRunning()) or self.rpc.busy or self._pending or self._logging_in:
+            return
+        self.install_btn.setEnabled(False)
+        self._installing = True
+        self.rpc.shutdown()
+        self._stop_auth()
+        self.connection_panel.setEnabled(False)
+        self._controls(False)
+        self.install_cancel.setEnabled(True)
+        self.install_cancel.show()
+        self.install_progress.setValue(0)
+        self.install_progress.show()
+        self.installer = RuntimeInstaller(self)
+        self.installer.progress.connect(self._install_progress)
+        self.installer.succeeded.connect(self._install_done)
+        self.installer.failed.connect(self._install_failed)
+        self.installer.start()
+
+    def _install_progress(self, text, percent):
+        self.install_info.setText(text)
+        self.install_progress.setValue(percent)
+
+    def _cancel_install(self):
+        if self.installer:
+            self.installer.cancel()
+            self.install_cancel.setEnabled(False)
+            self.install_info.setText('Отмена установки…')
+
+    def _install_done(self):
+        if self._closed:
+            return
+        self.install_cancel.hide()
+        self._installing = False
+        self.connection_panel.setEnabled(True)
+        self._controls(False)
+        self.install_btn.setEnabled(True)
+        self.status.setText('Компоненты ИИ установлены. Настройте подключение и отправьте сообщение.')
+        self._check_runtime()
+        self._open_connection()
+
+    def _install_failed(self, text):
+        if self._closed:
+            return
+        self.install_info.setText(text)
+        self._installing = False
+        self.connection_panel.setEnabled(True)
+        self._controls(False)
+        self.install_cancel.hide()
+        self.install_progress.hide()
+        self.install_btn.setText('Повторить установку компонентов ИИ')
+        self.install_btn.setEnabled(supported())
 
     def _fill_chats(self):
         self.chat_list.blockSignals(True)
@@ -249,13 +345,13 @@ class AITab(QWidget):
         self.chat_list.blockSignals(False)
 
     def _new_chat(self):
-        if self.store and not self.rpc.busy and not self._pending:
+        if self.store and not self.rpc.busy and not self._pending and not self._installing:
             self.store.new_chat(self.work_dir)
             self._fill_chats()
             self._select_chat(0)
 
     def _select_chat(self, index):
-        if not self.store or index < 0:
+        if not self.store or index < 0 or self._installing:
             return
         self.rpc.shutdown()
         self.current = self.store.chats[index]
@@ -264,7 +360,7 @@ class AITab(QWidget):
             self.timeline.finish("interrupted")
         self._render()
         same_folder = os.path.normcase(self.current["folder"]) == os.path.normcase(self.work_dir)
-        self.send_btn.setEnabled(same_folder and not self._logging_in)
+        self.send_btn.setEnabled(same_folder and not self._logging_in and not self._installing)
         if not same_folder:
             self.status.setText("Этот чат относится к другой папке. Нажмите «Новый чат» для текущей папки приложения.")
         elif self.current.get("interrupted"):
@@ -405,6 +501,7 @@ class AITab(QWidget):
         except (OSError, ValueError, RuntimeError) as exc:
             self._error(str(exc))
             self.connection_btn.setChecked(True)
+            self._check_runtime()
 
     def _ready_changed(self, ready):
         if ready and self._pending:
@@ -430,11 +527,11 @@ class AITab(QWidget):
         self.rpc.send_prompt(text)
 
     def _controls(self, active):
-        self.send_btn.setEnabled(not active and not self._logging_in and bool(self.current) and os.path.normcase(self.current["folder"]) == os.path.normcase(self.work_dir))
+        self.send_btn.setEnabled(not active and not self._logging_in and not self._installing and bool(self.current) and os.path.normcase(self.current["folder"]) == os.path.normcase(self.work_dir))
         self.stop_btn.setEnabled(active)
-        self.new_btn.setEnabled(not active and not self._logging_in)
-        self.chat_list.setEnabled(not active and not self._logging_in)
-        self.connection_panel.setEnabled(not active)
+        self.new_btn.setEnabled(not active and not self._logging_in and not self._installing)
+        self.chat_list.setEnabled(not active and not self._logging_in and not self._installing)
+        self.connection_panel.setEnabled(not active and not self._installing)
 
     def _busy_changed(self, busy):
         self._controls(busy or bool(self._pending))
@@ -530,6 +627,8 @@ class AITab(QWidget):
         self.output.set_messages(self.current["messages"])
 
     def _start_auth(self):
+        if self._installing:
+            raise ValueError('Дождитесь установки компонентов ИИ.')
         if self.auth.state() != QProcess.ProcessState.NotRunning:
             self._stop_auth()
         config = self._save_connection()
@@ -540,6 +639,8 @@ class AITab(QWidget):
         self._auth_closing = False
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PI_CODING_AGENT_DIR", str(agent_dir))
+        for name, value in runtime_environment().items():
+            env.insert(name, value)
         self.auth.setProcessEnvironment(env)
         self.auth.start(program, [str(auth_helper_path()), str(module), str(agent_dir)])
         if not self.auth.waitForStarted(3000):
@@ -563,6 +664,7 @@ class AITab(QWidget):
             self.auth_info.setText("Загрузка списка моделей…")
         except (ValueError, OSError) as exc:
             self.auth_info.setText(str(exc))
+            self._check_runtime()
 
     def _login(self):
         if self._logging_in or not self.store:
@@ -580,6 +682,7 @@ class AITab(QWidget):
             self.logout_btn.setEnabled(False)
         except (ValueError, OSError) as exc:
             self.auth_info.setText(str(exc))
+            self._check_runtime()
 
     def _logout(self):
         if not self.store or self._logging_in or self.rpc.busy or self._pending:
@@ -711,6 +814,7 @@ class AITab(QWidget):
         if not self._closed:
             self._end_login_ui()
             self.auth_info.setText(text)
+            self._check_runtime()
 
     def _auth_finished(self, code, _status):
         if not self._auth_closing and not self._closed:
@@ -735,6 +839,9 @@ class AITab(QWidget):
         self._connection_save_timer.stop()
         self._persist_connection()
         self._closed = True
+        if self.installer and self.installer.isRunning():
+            self.installer.cancel()
+            self.installer.wait()
         self.api_catalog.cancel()
         self._render_timer.stop()
         self._save_timer.stop()

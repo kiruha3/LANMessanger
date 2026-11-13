@@ -18,6 +18,9 @@ TESTS = (
     "test_legacy_ack.py",
     "test_platform_support.py",
     "test_ai.py",
+    "test_ai_installer.py",
+    "test_updates.py",
+    "test_tray_icon.py",
     "test_ai_catalog.py",
     "test_ai_timeline.py",
     "test_ai_ui.py",
@@ -27,7 +30,7 @@ TESTS = (
 
 def main():
     failed = []
-    env = dict(os.environ, PYTHONUTF8="1", QT_QPA_PLATFORM="offscreen")
+    env = dict(os.environ, PYTHONUTF8="1", QT_QPA_PLATFORM="offscreen", LANMESSENGER_NO_UPDATE_CHECK="1")
     for name in TESTS:
         print(f"\nRunning {name}", flush=True)
         with tempfile.TemporaryDirectory(prefix="lanmessenger-test-") as work:

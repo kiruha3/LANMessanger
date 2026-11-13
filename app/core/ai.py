@@ -143,13 +143,16 @@ class KeyVault:
 
 def runtime_command(configured: str = "") -> tuple[str, list[str], Path]:
     """Resolve node and the actual JS entry, never execute a .cmd through a shell."""
-    node = shutil.which("node")
+    from .ai_installer import runtime_folder
+    managed = runtime_folder()
+    node = str(managed / 'node/node.exe') if (managed / 'node/node.exe').is_file() else shutil.which("node")
     if not node:
-        raise ValueError("Не найден Node.js. Установите Node.js 22 LTS и перезапустите приложение.")
+        raise ValueError("Не найдены компоненты ИИ. Нажмите «Установить компоненты ИИ» во вкладке ИИ.")
     candidates = []
     if configured.strip():
         selected = Path(configured.strip()).expanduser()
         candidates.extend([selected / "dist" / "cli.js", selected / "node_modules/@mariozechner/pi-coding-agent/dist/cli.js", selected])
+    candidates.append(managed / 'node_modules/@mariozechner/pi-coding-agent/dist/cli.js')
     home = Path(application_folder())
     for base in (home, Path(__file__).resolve().parents[2], Path(os.environ.get("APPDATA", str(Path.home()))) / "npm"):
         candidates.extend([base / "ai-runtime/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
@@ -161,16 +164,24 @@ def runtime_command(configured: str = "") -> tuple[str, list[str], Path]:
     for candidate in candidates:
         if candidate.is_file() and candidate.name == "cli.js":
             return node, [str(candidate.resolve())], candidate.resolve().with_name("index.js")
-    raise ValueError(f"Не найден Pi. Установите: npm install -g @mariozechner/pi-coding-agent@{PI_VERSION}; либо укажите папку пакета в подключении.")
+    raise ValueError("Не найден Pi. Нажмите «Установить компоненты ИИ» или укажите папку установленного Pi в подключении.")
 
 
 def prepare_environment(root: Path, config: dict, key: str) -> dict:
+    from .ai_installer import managed_shell, runtime_environment
     agent = root / "pi"
     agent.mkdir(exist_ok=True)
     if sys.platform == "win32":
-        shell = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
+        shell = managed_shell()
+        if not shell.is_file():
+            shell = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
         if not shell.exists() and not shutil.which("bash"):
-            raise ValueError("Pi нужен Git Bash. Установите Git for Windows и перезапустите приложение.")
+            raise ValueError("Не найден Git Bash. Нажмите «Установить компоненты ИИ» во вкладке ИИ.")
+        if shell.is_file():
+            settings_path = agent / 'settings.json'
+            settings = json.loads(settings_path.read_text(encoding='utf-8')) if settings_path.exists() else {}
+            settings['shellPath'] = str(shell)
+            settings_path.write_text(json.dumps(settings), encoding='utf-8')
     auth_path = agent / "auth.json"
     if key and auth_path.exists():
         try:
@@ -179,7 +190,7 @@ def prepare_environment(root: Path, config: dict, key: str) -> dict:
             raise ValueError("Не удалось прочитать подключённый аккаунт Pi") from exc
         if config["provider"] in stored:
             raise ValueError("Для использования API-ключа сначала нажмите «Выйти из аккаунта» у этого провайдера: сохранённый аккаунт Pi имеет приоритет.")
-    env = {"PI_CODING_AGENT_DIR": str(agent)}
+    env = {"PI_CODING_AGENT_DIR": str(agent), **runtime_environment()}
     variable = PROVIDERS.get(config["provider"], ("", ""))[1]
     if key and variable:
         env[variable] = key

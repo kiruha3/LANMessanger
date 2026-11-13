@@ -98,11 +98,17 @@ class SettingsDialog(QDialog):
         self.manual_ip_box.setChecked(getattr(engine, "manual_ip_enabled", False))
         self.room_join_box = Switch("Вход в комнаты (комната@IP-хаба)")
         self.room_join_box.setChecked(getattr(engine, "room_join_enabled", False))
-        self.notify_box = Switch("Информационные уведомления (новые версии у узлов)")
+        self.notify_box = Switch("Уведомлять о новых версиях (GitHub и узлы LAN)")
         self.notify_box.setChecked(engine.notify_update)
-        self.test_btn = QPushButton("Проверить уведомление")
+        self.open_message_box = Switch('Открывать мессенджер при новом сообщении')
+        self.open_message_box.setChecked(getattr(engine, 'open_on_message', False))
+        self.open_message_box.setToolTip('Восстанавливать окно из трея или свёрнутого состояния и открывать нужный чат. Тихий режим и отключённые уведомления чата учитываются.')
+        self.test_btn = QPushButton("Показать пример уведомления")
         self.test_btn.setToolTip("Показать уведомление о версии так, как его увидят другие пользователи.")
         self.test_btn.clicked.connect(self._test_notification)
+        self.update_check_btn = QPushButton('Проверить обновления')
+        self.update_check_btn.setToolTip('Проверить стабильный Windows-релиз на GitHub. Результат появится в колокольчике.')
+        self.update_check_btn.clicked.connect(lambda: engine.check_updates(manual=True))
         rdp_controls = [self.rdp_box, self.shadow_box, self.shadow_btn]
 
         if sys.platform == "darwin":
@@ -125,9 +131,9 @@ class SettingsDialog(QDialog):
         self._add_zone("Защита", [self.tls_box, QLabel("Сетевой пароль (PSK для P2P):"),
                                   self.psk_edit, QLabel("Одинаковый у всех участников сети."), fp_label])
         self._add_zone("RDP", rdp_controls)
-        self._add_zone("Уведомления", [self.push_box, self.notify_box,
+        self._add_zone("Уведомления", [self.push_box, self.notify_box, self.open_message_box,
                                        QLabel("Ссылка на новые версии:"), self.url_edit,
-                                       QLabel("Текст уведомления о версии:"), self.text_edit, self.test_btn])
+                                       QLabel("Текст уведомления о версии:"), self.text_edit, self.update_check_btn, self.test_btn])
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         self.buttons.accepted.connect(self._apply)
 
@@ -227,6 +233,7 @@ class SettingsDialog(QDialog):
         engine.set_feature("manual_ip_enabled", self.manual_ip_box.isChecked())
         engine.set_feature("room_join_enabled", self.room_join_box.isChecked())
         engine.set_notify_update(self.notify_box.isChecked())
+        engine.set_feature('open_on_message', self.open_message_box.isChecked())
         url = self.url_edit.text().strip()
         if url and url != engine.update_url:
             engine.set_update_url(url)

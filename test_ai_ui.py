@@ -25,6 +25,47 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_installation_blocks_chat_selection_and_runtime_controls(self):
+        with tempfile.TemporaryDirectory() as root, patch('app.ui.ai_tab.RuntimeInstaller') as factory:
+            factory.return_value.isRunning.return_value = True
+            tab=AITab(data_dir=root,work_dir=root)
+            try:
+                tab._install_runtime()
+                self.assertFalse(tab.connection_panel.isEnabled())
+                self.assertFalse(tab.chat_list.isEnabled())
+                tab._select_chat(0)
+                self.assertFalse(tab.send_btn.isEnabled())
+            finally:
+                tab.shutdown(); tab.close()
+
+    def test_incomplete_managed_runtime_offers_repair(self):
+        with tempfile.TemporaryDirectory() as root:
+            runtime = Path(root,'runtime'); runtime.mkdir()
+            with patch('app.core.ai_installer.runtime_folder',return_value=runtime), patch('app.ui.ai_tab.runtime_command',return_value=('node', ['cli'], runtime/'index.js')):
+                tab=AITab(data_dir=str(Path(root,'data')),work_dir=root)
+                try:
+                    self.assertFalse(tab.install_panel.isHidden())
+                    self.assertIsNone(tab.installer)
+                    tab.install_panel.hide()
+                    tab._auth_failed('missing component')
+                    self.assertFalse(tab.install_panel.isHidden())
+                finally:
+                    tab.shutdown(); tab.close()
+
+    def test_missing_runtime_offers_install_without_downloading_or_losing_prompt(self):
+        with tempfile.TemporaryDirectory() as root, patch('app.ui.ai_tab.runtime_command', side_effect=ValueError('missing')):
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertFalse(tab.install_panel.isHidden())
+                self.assertIsNone(tab.installer)
+                tab.model.setEditText('synthetic-model')
+                tab.input.setPlainText('do something')
+                tab._send()
+                self.assertEqual(tab.input.toPlainText(), 'do something')
+                self.assertIsNone(tab.installer)
+            finally:
+                tab.shutdown(); tab.close()
+
     def test_api_disconnect_clears_memory_and_saved_key_without_pi(self):
         with tempfile.TemporaryDirectory() as root:
             tab = AITab(data_dir=root, work_dir=root)

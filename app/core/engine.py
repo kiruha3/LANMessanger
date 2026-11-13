@@ -84,7 +84,9 @@ class Engine:
         self._notified_versions: set[str] = set()
         self.update_url = DEFAULT_UPDATE_URL
         self.update_text = DEFAULT_UPDATE_TEXT
-        self.notify_update = False  # алерты о версиях — по свитчу
+        self.notify_update = True  # сохранённое отключение имеет приоритет
+        self.open_on_message = False
+        self._update_check_lock = threading.Lock()
         self.connections.on_connect = self._on_peer_connected
         self.connections.on_events = self._on_events_packet
         self._remind_interval = 30.0
@@ -162,6 +164,44 @@ class Engine:
                                            my=__version__, url=url)
         self.add_notification(f"Новая версия {node.version}", text,
                               link=url, kind="update")
+
+    def check_updates(self, manual=False):
+        """Start an independent network check without delaying UI or watchdog."""
+        if sys.platform == 'darwin':
+            if manual:
+                self.add_notification('Обновления', 'Релизы для macOS проверяйте на странице проекта.', link='https://github.com/kiruha3/LANMessanger/releases')
+            return
+        if not self._update_check_lock.acquire(blocking=False):
+            return
+
+        def check():
+            try:
+                from .updates import fetch_update
+                update = fetch_update(__version__)
+                if self._wd_stop.is_set() or (not manual and not self.notify_update):
+                    return
+                if update:
+                    version, url = update
+                    if manual or version not in self._notified_versions:
+                        self._notified_versions.add(version)
+                        self.add_notification(f'Новая версия {version}', f'Доступен LAN Messenger {version} (у вас {__version__}). Скачать: {url}', link=url, kind='update')
+                elif manual:
+                    self.add_notification('Проверка обновлений', f'Новых стабильных версий Windows нет. У вас {__version__}.')
+            except Exception:
+                if manual and not self._wd_stop.is_set():
+                    self.add_notification('Проверка обновлений', 'Не удалось проверить GitHub. Проверьте интернет и повторите позже.')
+            finally:
+                self._update_check_lock.release()
+        threading.Thread(target=check, daemon=True).start()
+
+    def _updates_loop(self):
+        if self._wd_stop.wait(20):
+            return
+        while not self._wd_stop.is_set():
+            if self.notify_update:
+                self.check_updates()
+            if self._wd_stop.wait(6 * 60 * 60):
+                return
 
     # --- календарь: события, рассылка, напоминания ---
 
@@ -312,6 +352,8 @@ class Engine:
         self.discovery.start()
         self._wd_stop.clear()
         threading.Thread(target=self._channel_watchdog, daemon=True).start()
+        if not os.environ.get('LANMESSENGER_NO_UPDATE_CHECK'):
+            threading.Thread(target=self._updates_loop, daemon=True).start()
         if self.history:
             self.history.init_events()
             threading.Thread(target=self._reminder_loop, daemon=True).start()
@@ -1075,6 +1117,7 @@ class Engine:
             "update_url": self.update_url,
             "update_text": self.update_text,
             "notify_update": self.notify_update,
+            "open_on_message": self.open_on_message,
             "push": {
                 "enabled": self._push_enabled,
                 "port": self._push_port,
@@ -1124,7 +1167,8 @@ class Engine:
         else:
             self.update_url = saved_url or DEFAULT_UPDATE_URL
         self.update_text = str(data.get("update_text") or DEFAULT_UPDATE_TEXT)
-        self.notify_update = bool(data.get("notify_update", False))
+        self.notify_update = bool(data.get("notify_update", True))
+        self.open_on_message = bool(data.get("open_on_message", False))
         self.discovery.update_url = self.update_url
         self.discovery.update_text = self.update_text
         push = data.get("push") or {}

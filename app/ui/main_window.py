@@ -32,17 +32,11 @@ from ..net.constants import is_private_ip
 from . import theme
 from .chat_window import ChatPanel
 from .info_panel import InfoPanel
+from .app_icon import messenger_icon, unread_badge
 
 
-def make_icon(color: str = "#1a7f37") -> QIcon:
-    pm = QPixmap(32, 32)
-    pm.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pm)
-    painter.setBrush(QColor(color))
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(4, 4, 24, 24)
-    painter.end()
-    return QIcon(pm)
+def make_icon() -> QIcon:
+    return messenger_icon()
 
 
 def make_bell_icon(count: int = 0, size: int = 28) -> QIcon:
@@ -387,6 +381,19 @@ class MainWindow(QMainWindow):
         count = self.engine.unread_notifications()
         self.notif_btn.setIcon(make_bell_icon(count))
         self.notif_btn.setIconSize(QSize(28, 28))
+        self._update_tray_badge()
+
+    def _update_tray_badge(self):
+        messages, notifications = unread_badge(self.engine.unread, self.engine.notifications)
+        signature = (messages, notifications, self.engine.name)
+        if getattr(self, '_tray_badge_signature', None) == signature:
+            return
+        self._tray_badge_signature = signature
+        self.tray.setIcon(messenger_icon(messages + notifications))
+        text = f'LAN Messenger {__version__} — {self.engine.name}'
+        if messages or notifications:
+            text += f'\nНепрочитанных сообщений: {messages}; уведомлений: {notifications}'
+        self.tray.setToolTip(text)
 
     def _toggle_notif_panel(self):
         if self._notif_panel and self._notif_panel.isVisible():
@@ -470,6 +477,13 @@ class MainWindow(QMainWindow):
         self.refresh()  # unread-бейдж обновляется даже у замьюченного чата
         if self._muted() or self.engine.is_chat_muted(key):
             return
+        if self.engine.open_on_message and (not self.isVisible() or self.isMinimized()):
+            self._show_from_tray()
+            self.tabs.setCurrentIndex(0)
+            self.select_chat(key)
+            self._update_tray_badge()
+            QApplication.beep()
+            return
         if self.isVisible() and self.chat_panel.key == key and self.isActiveWindow():
             return
         node = self.engine.node_by_key(key)
@@ -506,7 +520,7 @@ class MainWindow(QMainWindow):
         if name and name != self.engine.name:
             self.engine.set_name(name)
             self.setWindowTitle(f"LAN Messenger {__version__} — {name}")
-            self.tray.setToolTip(f"LAN Messenger {__version__} — {name}")
+            self._update_tray_badge()
 
     def _open_settings(self):
         from .settings_dialog import SettingsDialog
@@ -711,6 +725,7 @@ class MainWindow(QMainWindow):
         return f"room:{room_info.get('hub_key', '')}/{room_info.get('room', '')}"
 
     def refresh(self):
+        self._update_tray_badge()
         self._refresh_rejected()
         self.info_panel.refresh()
         self._normalize_panel()
