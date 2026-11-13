@@ -25,6 +25,51 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_api_disconnect_clears_memory_and_saved_key_without_pi(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+                tab.endpoint.setText("https://example.invalid/v1")
+                tab.model.setEditText("model-id")
+                tab.key.setText("synthetic-key")
+                if sys.platform == "win32":
+                    tab.remember.setChecked(True)
+                    tab._save_connection()
+                    self.assertTrue(tab.vault.path.exists())
+                self.assertTrue(tab.login_btn.isHidden())
+                self.assertEqual(tab.logout_btn.text(), "Отключить API-ключ")
+                with patch.object(tab, "_start_auth", side_effect=AssertionError("API disconnect must not need Pi")):
+                    tab.logout_btn.click()
+                self.assertEqual(tab.key.text(), "")
+                self.assertFalse(tab.remember.isChecked())
+                self.assertFalse(tab.vault.path.exists())
+                self.assertFalse(tab.logout_btn.isEnabled())
+                self.assertEqual(tab.endpoint.text(), "https://example.invalid/v1")
+                self.assertEqual(tab.model.currentText(), "model-id")
+                self.assertIn("отключён", tab.auth_info.text())
+            finally:
+                tab.shutdown()
+                tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertEqual(restored.key.text(), "")
+            finally:
+                restored.shutdown()
+                restored.close()
+
+    def test_account_logout_confirmation_survives_catalog_refresh(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                events = b'{"type":"logged_out","provider":"openai-codex"}\n' + b'{"type":"catalog","models":[],"providers":[{"id":"openai-codex"}],"authenticated":[]}\n'
+                with patch.object(tab.auth, "readAllStandardOutput", return_value=events), patch.object(tab, "_auth_command"):
+                    tab._auth_read()
+                self.assertIn("вышли из аккаунта", tab.auth_info.text())
+            finally:
+                tab.shutdown()
+                tab.close()
+
     def test_reasoning_level_saved_passed_to_pi_and_effective_level_shown(self):
         with tempfile.TemporaryDirectory() as root:
             tab = AITab(data_dir=root, work_dir=root)

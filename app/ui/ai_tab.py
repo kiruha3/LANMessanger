@@ -50,6 +50,7 @@ class AITab(QWidget):
         self.api_catalog.busy_changed.connect(self._catalog_busy)
         self._oauth_providers = {"anthropic", "openai-codex", "github-copilot"}
         self._auth_url = ""
+        self._auth_notice = None
         self._logging_in = False
         self._stopped = False
         self._closed = False
@@ -126,11 +127,13 @@ class AITab(QWidget):
         self.login_btn.clicked.connect(self._login)
         self.logout_btn = QPushButton("Выйти из аккаунта")
         self.logout_btn.clicked.connect(self._logout)
+        self.key_disconnect_btn = QPushButton("Отключить API-ключ")
+        self.key_disconnect_btn.clicked.connect(self._disconnect_key)
         self.cancel_login_btn = QPushButton("Отменить вход")
         self.cancel_login_btn.clicked.connect(self._cancel_login)
         self.cancel_login_btn.hide()
         buttons = QHBoxLayout()
-        for button in (self.login_btn, self.logout_btn, self.cancel_login_btn):
+        for button in (self.login_btn, self.logout_btn, self.key_disconnect_btn, self.cancel_login_btn):
             buttons.addWidget(button)
         self.auth_info = QLabel("")
         self.auth_info.setWordWrap(True)
@@ -223,7 +226,9 @@ class AITab(QWidget):
         self.endpoint.textChanged.connect(self._connection_changed)
         self.runtime.textChanged.connect(self._connection_changed)
         self.key.textChanged.connect(self._connection_changed)
+        self.key.textChanged.connect(self._provider_visibility)
         self.remember.toggled.connect(self._schedule_connection_save)
+        self.remember.toggled.connect(self._provider_visibility)
         self._last_provider = self.provider.currentData()
         self._catalog_identity = self._discovery_identity()
         if not self.store.chats:
@@ -326,6 +331,7 @@ class AITab(QWidget):
             self.connection_status.setText(f"Не удалось сохранить подключение: {exc}")
 
     def _provider_changed(self):
+        self._auth_notice = None
         self.key.clear()
         self.remember.setChecked(False)
         self._last_provider = self.provider.currentData()
@@ -335,9 +341,16 @@ class AITab(QWidget):
 
     def _provider_visibility(self):
         provider = self.provider.currentData()
+        account = provider in self._oauth_providers
+        has_key = bool(self.key.text().strip()) or self.remember.isChecked()
         self.endpoint.setEnabled(provider == "lanmessenger-api")
         self.key.setEnabled(bool(PROVIDERS[provider][1]))
-        self.login_btn.setEnabled(provider in self._oauth_providers and not self._logging_in)
+        self.login_btn.setVisible(account)
+        self.login_btn.setEnabled(account and not self._logging_in)
+        self.logout_btn.setText("Выйти из аккаунта" if account else "Отключить API-ключ")
+        self.logout_btn.setEnabled(not self._logging_in and (account or has_key))
+        self.key_disconnect_btn.setVisible(account and bool(PROVIDERS[provider][1]))
+        self.key_disconnect_btn.setEnabled(not self._logging_in and has_key)
 
     def _browse_runtime(self):
         folder = QFileDialog.getExistingDirectory(self, "Папка установленного Pi")
@@ -364,7 +377,8 @@ class AITab(QWidget):
         self.connection_status.setText(
             "Подключение и API-ключ сохранены средствами Windows."
             if self.remember.isChecked() and key else
-            "Подключение сохранено. API-ключ — только до выхода из приложения.")
+            "Подключение сохранено. API-ключ — только до выхода из приложения." if key else
+            "Подключение сохранено. API-ключ не задан.")
         return config
 
     def _send(self):
@@ -538,6 +552,7 @@ class AITab(QWidget):
         if self._logging_in or not self.store:
             return
         try:
+            self._auth_notice = None
             if self.provider.currentData() == "lanmessenger-api":
                 self._persist_connection()
                 self.api_catalog.fetch(self.endpoint.text(), self.key.text())
@@ -567,12 +582,32 @@ class AITab(QWidget):
             self.auth_info.setText(str(exc))
 
     def _logout(self):
+        if not self.store or self._logging_in or self.rpc.busy or self._pending:
+            return
+        if self.provider.currentData() not in self._oauth_providers:
+            self._disconnect_key()
+            return
         try:
             self.rpc.shutdown()
             self._start_auth()
             self._auth_command({"type": "logout", "provider": self.provider.currentData()})
         except (ValueError, OSError) as exc:
             self.auth_info.setText(str(exc))
+
+    def _disconnect_key(self):
+        if not self.store or self._logging_in or self.rpc.busy or self._pending:
+            return
+        try:
+            self.vault.clear()
+            self.rpc.shutdown()
+            self.api_catalog.cancel()
+            self.remember.setChecked(False)
+            self.key.clear()
+            self._save_connection()
+            self._provider_visibility()
+            self.auth_info.setText("API-ключ отключён и удалён из сохранённых данных. Для подключения введите ключ заново.")
+        except (ValueError, OSError) as exc:
+            self.auth_info.setText(f"Не удалось отключить API-ключ: {exc}")
 
     def _auth_read(self):
         try:
@@ -589,7 +624,11 @@ class AITab(QWidget):
                     continue
                 self._fill_models(self.model.currentText())
                 logged = self.provider.currentData() in event.get("authenticated", [])
-                self.auth_info.setText("Аккаунт подключён." if logged else "Модели загружены. Войдите в аккаунт или введите API-ключ.")
+                notice = self._auth_notice
+                self._auth_notice = None
+                self.auth_info.setText(notice[1] if notice and notice[0] == self.provider.currentData() else
+                                       "Аккаунт подключён." if logged else "Модели загружены. Войдите в аккаунт или введите API-ключ.")
+                self._provider_visibility()
             elif kind == "auth":
                 url = QUrl(event.get("url", ""))
                 if url.scheme() in ("https", "http"):
@@ -609,7 +648,11 @@ class AITab(QWidget):
                 self.auth_info.setText(event.get("message", ""))
             elif kind in ("logged_in", "logged_out"):
                 self._end_login_ui()
-                self.auth_info.setText("Аккаунт подключён." if kind == "logged_in" else "Вы вышли из аккаунта.")
+                message = "Аккаунт подключён." if kind == "logged_in" else "Вы вышли из аккаунта Pi на этом компьютере."
+                if kind == "logged_out" and self.key.text().strip():
+                    message += " Введённый API-ключ остаётся подключён; отключить его можно отдельной кнопкой."
+                self._auth_notice = (event.get("provider", self.provider.currentData()), message)
+                self.auth_info.setText(message)
                 self._auth_command({"type": "list"})
                 self.rpc.shutdown()
             elif kind == "error":
