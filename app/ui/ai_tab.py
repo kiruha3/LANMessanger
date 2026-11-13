@@ -1,7 +1,7 @@
 """Integrated local Pi chat, connection settings and account login."""
-import html
 import json
 import os
+import uuid
 from pathlib import Path
 
 from PyQt6.QtCore import QProcess, QProcessEnvironment, QTimer, Qt, QUrl, pyqtSignal
@@ -9,20 +9,14 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
-    QSplitter, QTextBrowser, QVBoxLayout, QWidget,
+    QSplitter, QVBoxLayout, QWidget,
 )
 
 from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS,
                        application_folder, auth_helper_path, prepare_environment, runtime_command)
 from ..core.history import base_dir
-from . import theme
-
-
-def message_text(message):
-    content = message.get("content", [])
-    if isinstance(content, str):
-        return content
-    return "\n".join(block.get("text", "") for block in content if block.get("type") == "text")
+from ..core.ai_timeline import Timeline, restore_messages
+from .ai_transcript import AITranscript
 
 
 class AIChatInput(QPlainTextEdit):
@@ -45,8 +39,7 @@ class AITab(QWidget):
         self.store = None
         self.current = None
         self._pending = None
-        self._assistant = None
-        self._tools = {}
+        self.timeline = None
         self._models = []
         self._oauth_providers = {"anthropic", "openai-codex", "github-copilot"}
         self._auth_url = ""
@@ -154,9 +147,7 @@ class AITab(QWidget):
         self.connection_panel.hide()
         self.connection_btn.toggled.connect(self.connection_panel.setVisible)
 
-        self.output = QTextBrowser()
-        self.output.setOpenLinks(False)
-        self.output.setOpenExternalLinks(False)
+        self.output = AITranscript(self.work_dir)
         self.input = AIChatInput()
         self.input.setPlaceholderText("Задача для агента. Enter — отправить, Shift+Enter — новая строка")
         self.input.setMaximumHeight(95)
@@ -242,8 +233,9 @@ class AITab(QWidget):
             return
         self.rpc.shutdown()
         self.current = self.store.chats[index]
-        self._assistant = None
-        self._tools = {}
+        self.timeline = Timeline(self.current["messages"], self.rpc.redact)
+        if not self.current.get("running"):
+            self.timeline.finish("interrupted")
         self._render()
         same_folder = os.path.normcase(self.current["folder"]) == os.path.normcase(self.work_dir)
         self.send_btn.setEnabled(same_folder and not self._logging_in)
@@ -350,9 +342,8 @@ class AITab(QWidget):
 
     def _submit(self, text):
         self._stopped = False
-        self._assistant = None
-        self._tools = {}
         self.current["messages"].append({"role": "user", "text": text})
+        self.timeline = Timeline(self.current["messages"], self.rpc.redact)
         if self.current["title"] == "Новый чат":
             self.current["title"] = text.replace("\n", " ")[:45]
             self.chat_list.currentItem().setText(self.current["title"])
@@ -397,6 +388,7 @@ class AITab(QWidget):
             return
         self._pending = None
         if self.current and self.current.get("running"):
+            self.timeline.finish("interrupted")
             self.current["running"] = False
             self.current["interrupted"] = True
             self.current["messages"].append({"role": "system", "text": self.rpc.redact(text)})
@@ -411,27 +403,12 @@ class AITab(QWidget):
         kind = event.get("type")
         messages = self.current["messages"]
         if kind == "response" and event.get("command") == "get_messages" and event.get("success"):
-            restored = []
-            tool_messages = {}
-            for message in event.get("data", {}).get("messages", []):
-                role = message.get("role")
-                if role in ("user", "assistant"):
-                    text = self.rpc.redact(message_text(message))
-                    if text:
-                        restored.append({"role": role, "text": text})
-                    for block in message.get("content", []) if isinstance(message.get("content"), list) else []:
-                        if block.get("type") == "toolCall":
-                            args = self.rpc.redact(json.dumps(block.get("arguments", {}), ensure_ascii=False, indent=2))
-                            restored.append({"role": "tool", "text": f"{block.get('name', 'Инструмент')}\n{args}", "result": ""})
-                            tool_messages[block.get("id")] = restored[-1]
-                elif role == "toolResult":
-                    tool = tool_messages.get(message.get("toolCallId"))
-                    if tool is not None:
-                        tool["result"] = self.rpc.redact(message_text(message))[-16000:]
+            restored = restore_messages(event.get("data", {}).get("messages", []), self.rpc.redact)
             lost_context = bool(messages) and not restored
             self.current["messages"] = restored
             if lost_context:
                 self.current["messages"].append({"role": "system", "text": "Сессия Pi пуста или потеряна. Агент начинает новый контекст."})
+            self.timeline = Timeline(self.current["messages"], self.rpc.redact)
             self._save()
             self._render()
             if self._pending:
@@ -441,32 +418,9 @@ class AITab(QWidget):
                 except RuntimeError as exc:
                     self._error(str(exc))
             return
-        if kind == "message_start" and event.get("message", {}).get("role") == "assistant":
-            messages.append({"role": "assistant", "text": ""})
-            self._assistant = len(messages) - 1
-        elif kind == "message_update":
-            delta = event.get("assistantMessageEvent", {})
-            if delta.get("type") == "text_delta":
-                if self._assistant is None:
-                    messages.append({"role": "assistant", "text": ""})
-                    self._assistant = len(messages) - 1
-                messages[self._assistant]["text"] += delta.get("delta", "")
-        elif kind == "message_end" and event.get("message", {}).get("role") == "assistant":
-            message = event["message"]
-            if self._assistant is not None:
-                messages[self._assistant]["text"] = message_text(message)
-            if message.get("errorMessage"):
-                messages.append({"role": "system", "text": self.rpc.redact(message["errorMessage"])})
-        elif kind == "tool_execution_start":
-            args = self.rpc.redact(json.dumps(event.get("args", {}), ensure_ascii=False, indent=2))
-            messages.append({"role": "tool", "text": f"{event.get('toolName', 'Инструмент')}\n{args}", "result": "Выполняется…"})
-            self._tools[event.get("toolCallId")] = len(messages) - 1
-        elif kind in ("tool_execution_update", "tool_execution_end"):
-            index = self._tools.get(event.get("toolCallId"))
-            if index is not None:
-                result = event.get("result", event.get("partialResult", {}))
-                messages[index]["result"] = self.rpc.redact(message_text(result))[-16000:]
-        elif kind == "agent_end":
+        self.timeline.event(event)
+        if kind == "agent_end":
+            self.timeline.finish("stopped" if self._stopped else "completed")
             self.current["running"] = False
             self.current["interrupted"] = False
             self.status.setText("Агент остановлен." if self._stopped else "Задача завершена.")
@@ -486,17 +440,11 @@ class AITab(QWidget):
     def _render(self):
         if not self.current:
             return
-        scroll = self.output.verticalScrollBar()
-        colors = theme.bubbles()
-        sections = []
-        labels = {"user": "Вы", "assistant": "Агент", "tool": "Действие", "system": "Состояние"}
+        # Also assign stable identities to legacy/system entries appended outside the projection.
         for message in self.current["messages"]:
-            text = html.escape(message.get("text", "")).replace("\n", "<br>")
-            if message.get("role") == "tool":
-                text += "<br>" + html.escape(message.get("result", "")).replace("\n", "<br>")
-            sections.append(f'<p><b style="color:{colors["accent"]}">{labels.get(message.get("role"), "Сообщение")}</b><br>{text}</p>')
-        self.output.setHtml(f'<body style="color:{colors["text"]}">' + "".join(sections) + "</body>")
-        scroll.setValue(scroll.maximum())
+            if "id" not in message:
+                message["id"] = str(uuid.uuid4())
+        self.output.set_messages(self.current["messages"])
 
     def _start_auth(self):
         if self.auth.state() != QProcess.ProcessState.NotRunning:
@@ -659,6 +607,7 @@ class AITab(QWidget):
         self._save_timer.stop()
         self._pending = None
         if self.current and self.current.get("running"):
+            self.timeline.finish("interrupted")
             self.current["running"] = False
             self.current["interrupted"] = True
         self.rpc.shutdown()

@@ -18,6 +18,7 @@ TESTS = (
     "test_legacy_ack.py",
     "test_platform_support.py",
     "test_ai.py",
+    "test_ai_timeline.py",
     "test_ai_ui.py",
     "test_ai_pi.py",
 )

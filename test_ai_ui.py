@@ -25,6 +25,82 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_provider_failure_does_not_report_unexecuted_tool_as_completed(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab._event({"type": "message_start", "message": {"role": "assistant"}})
+                tab._event({"type": "message_end", "message": {"role": "assistant", "stopReason": "error",
+                    "errorMessage": "provider disconnected", "content": [
+                        {"type": "toolCall", "id": "not-run", "name": "write", "arguments": {"path": "example.txt"}}]}})
+                tab._event({"type": "agent_end"})
+                tool = next(m for m in tab.current["messages"] if m["role"] == "tool")
+                self.assertEqual(tool["status"], "interrupted")
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_native_rows_stream_markdown_thinking_and_tool_details(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab._event({"type": "message_start", "message": {"role": "assistant"}})
+                tab._render()
+                self.assertEqual(len(tab.output.rows), 0)
+                tab._event({"type": "message_update", "assistantMessageEvent": {
+                    "type": "thinking_delta", "contentIndex": 0, "delta": "checking"}})
+                tab._event({"type": "message_update", "assistantMessageEvent": {
+                    "type": "text_delta", "contentIndex": 1, "delta": "**answer**\n\n```html\n<script>inert</script>\n```"}})
+                tab._event({"type": "tool_execution_start", "toolCallId": "call", "toolName": "write",
+                            "args": {"path": "sun.html", "content": "very long payload"}})
+                tab._render()
+                rows = list(tab.output.rows.values())
+                self.assertEqual(len(rows), 3)
+                self.assertIn("checking", rows[0].body.toPlainText())
+                self.assertTrue(rows[0].header.isChecked())
+                self.assertIn("font-weight", rows[1].body.toHtml())
+                self.assertNotIn("<script>", rows[1].body.toHtml())
+                self.assertIn("sun.html", rows[2].header.text())
+                self.assertNotIn("very long payload", rows[2].header.text())
+                self.assertFalse(rows[2].header.isChecked())
+                rows[2].header.click()
+                self.assertTrue(rows[2].header.isChecked())
+                self.assertIn("very long payload", rows[2].body.toPlainText())
+                tab._event({"type": "tool_execution_end", "toolCallId": "call", "isError": True,
+                            "result": {"content": [{"type": "text", "text": "permission denied"}]}})
+                tab._render()
+                self.assertIs(list(tab.output.rows.values())[0], rows[0])
+                self.assertIs(list(tab.output.rows.values())[2], rows[2])
+                self.assertTrue(rows[2].header.isChecked())
+                self.assertIn("Ошибка", rows[2].header.text())
+                self.assertIn("permission denied", rows[2].body.toPlainText())
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_new_content_scrolls_down_but_expanding_history_does_not(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(800, 600)
+            tab.show()
+            try:
+                tab.current["messages"].extend([
+                    {"id": "tool", "role": "tool", "text": "read\n{}", "result": "history\n" * 60},
+                    {"id": "text", "role": "assistant", "text": "line\n\n" * 80}])
+                tab._render()
+                wait_for(lambda: tab.output.verticalScrollBar().maximum() > 0)
+                scroll = tab.output.verticalScrollBar()
+                scroll.setValue(0)
+                tab.output.rows["tool"].header.click()
+                APP.processEvents()
+                self.assertEqual(scroll.value(), 0)
+                tab._event({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "new answer"}})
+                tab._render()
+                wait_for(lambda: scroll.value() == scroll.maximum())
+            finally:
+                tab.shutdown()
+                tab.close()
+
     @unittest.skipUnless(sys.platform == "win32", "Windows DPAPI")
     def test_connection_and_key_survive_restart_without_sending(self):
         with tempfile.TemporaryDirectory() as root:
