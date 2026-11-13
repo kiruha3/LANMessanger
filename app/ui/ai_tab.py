@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QProcess, QProcessEnvironment, QTimer, Qt, QUrl
+from PyQt6.QtCore import QProcess, QProcessEnvironment, QTimer, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout,
@@ -23,6 +23,19 @@ def message_text(message):
     if isinstance(content, str):
         return content
     return "\n".join(block.get("text", "") for block in content if block.get("type") == "text")
+
+
+class AIChatInput(QPlainTextEdit):
+    submitted = pyqtSignal()
+
+    def keyPressEvent(self, event):
+        if (event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            if not event.isAutoRepeat():
+                self.submitted.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class AITab(QWidget):
@@ -138,12 +151,10 @@ class AITab(QWidget):
         self.output = QTextBrowser()
         self.output.setOpenLinks(False)
         self.output.setOpenExternalLinks(False)
-        self.input = QPlainTextEdit()
-        self.input.setPlaceholderText("Задача для агента. Ctrl+Enter — отправить")
+        self.input = AIChatInput()
+        self.input.setPlaceholderText("Задача для агента. Enter — отправить, Shift+Enter — новая строка")
         self.input.setMaximumHeight(95)
-        from PyQt6.QtGui import QKeySequence, QShortcut
-        shortcut = QShortcut(QKeySequence("Ctrl+Return"), self.input)
-        shortcut.activated.connect(self._send)
+        self.input.submitted.connect(self._send)
         self.send_btn = QPushButton("Отправить")
         self.send_btn.clicked.connect(self._send)
         self.stop_btn = QPushButton("Стоп")
