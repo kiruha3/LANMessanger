@@ -25,6 +25,53 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_trailing_whitespace_does_not_expand_streamed_message(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.current["messages"].extend([
+                    {"id": "answer", "role": "assistant", "text": "Done" + "\n \t" * 500},
+                    {"id": "blank", "role": "thinking", "text": "\n \t" * 500, "status": "running"}])
+                tab._render()
+                self.assertNotIn("blank", tab.output.rows)
+                self.assertEqual(tab.output.rows["answer"].body.toPlainText(), "Done")
+                self.assertLess(tab.output.rows["answer"].body.height(), 100)
+                self.assertTrue(tab.current["messages"][0]["text"].endswith("\t"))
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_expanded_tool_output_uses_only_transcript_scrollbar(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(800, 600)
+            tab.show()
+            try:
+                tab.current["messages"].append({"id": "tool", "role": "tool", "text": "bash\n{}",
+                                                "result": "command output\n" * 120})
+                tab._render()
+                tab.output.rows["tool"].header.click()
+                for _ in range(5):
+                    APP.processEvents()
+                body = tab.output.rows["tool"].body
+                self.assertGreater(body.height(), 320)
+                self.assertEqual(body.verticalScrollBar().maximum(), 0)
+                self.assertGreater(tab.output.verticalScrollBar().maximum(), 0)
+                from PyQt6.QtCore import QPoint, QPointF, Qt
+                from PyQt6.QtGui import QWheelEvent
+                scroll = tab.output.verticalScrollBar()
+                scroll.setValue(0)
+                position = QPointF(20, 20)
+                event = QWheelEvent(position, QPointF(body.viewport().mapToGlobal(QPoint(20, 20))),
+                                    QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
+                                    Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+                QApplication.sendEvent(body.viewport(), event)
+                APP.processEvents()
+                self.assertGreater(scroll.value(), 0)
+            finally:
+                tab.shutdown()
+                tab.close()
+
     def test_provider_failure_does_not_report_unexecuted_tool_as_completed(self):
         with tempfile.TemporaryDirectory() as root:
             tab = AITab(data_dir=root, work_dir=root)

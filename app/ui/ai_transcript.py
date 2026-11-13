@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QTextCharFormat, QTextCursor, QTextDocument
-from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QSizePolicy, QTextBrowser, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QSizePolicy, QTextBrowser, QToolButton, QVBoxLayout, QWidget
 
 from . import theme
 
@@ -20,16 +20,15 @@ TOOL_NAMES = {"bash": "Команда", "read": "Чтение", "write": "Зап
 
 
 class MessageBody(QTextBrowser):
-    def __init__(self, folder, compact=False, parent=None):
+    def __init__(self, folder, parent=None):
         super().__init__(parent)
-        self.compact = compact
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
         self.anchorClicked.connect(self._open_link)
         self.document().setBaseUrl(QUrl.fromLocalFile(str(Path(folder).resolve()) + "/"))
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded if compact else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         colors = theme.bubbles()
         self.setStyleSheet(f"QTextBrowser {{ background: transparent; color: {colors['text']}; border: none; }}")
         self.document().setDefaultStyleSheet(
@@ -48,6 +47,8 @@ class MessageBody(QTextBrowser):
             QDesktopServices.openUrl(resolved)
 
     def set_content(self, text, markdown=False):
+        # Streaming providers can emit long whitespace tails; keep the raw transcript intact.
+        text = text.rstrip()
         if markdown:
             self.document().setMarkdown(text, QTextDocument.MarkdownFeature.MarkdownDialectGitHub
                                         | QTextDocument.MarkdownFeature.MarkdownNoHTML)
@@ -69,17 +70,25 @@ class MessageBody(QTextBrowser):
         else:
             self.setPlainText(text)
         self._fit_height()
-        if self.compact:
-            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
     def _fit_height(self):
         self.document().setTextWidth(max(40, self.viewport().width()))
         height = math.ceil(self.document().size().height()) + 8
-        self.setFixedHeight(max(32, min(height, 320) if self.compact else height))
+        self.setFixedHeight(max(32, height))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_height()
+
+    def wheelEvent(self, event):
+        # The message fits its document; let the enclosing transcript handle the wheel.
+        parent = self.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QScrollArea):
+                QApplication.sendEvent(parent.viewport(), event)
+                return
+            parent = parent.parentWidget()
+        event.ignore()
 
 
 class TranscriptRow(QFrame):
@@ -110,7 +119,7 @@ class TranscriptRow(QFrame):
             if self.role == "user":
                 self.setStyleSheet(f"TranscriptRow {{ background: {colors['out']}; border-radius: 6px; }}")
         layout.addWidget(self.header)
-        self.body = MessageBody(folder, compact=self.expandable, parent=self)
+        self.body = MessageBody(folder, parent=self)
         layout.addWidget(self.body)
         self.update_message(message)
 
@@ -185,7 +194,7 @@ class AITranscript(QScrollArea):
 
     def set_messages(self, messages, scroll_to_end=True):
         visible = [message for message in messages
-                   if message.get("role") == "tool" or message.get("text")]
+                   if message.get("role") == "tool" or message.get("text", "").strip()]
         order = [message["id"] for message in visible]
         changed = order != self._order
         for key in set(self.rows) - set(order):
