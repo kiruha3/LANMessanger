@@ -1,5 +1,14 @@
 # Third-party notices
 
+## HTTPS certificate trust
+
+The executable includes certifi 2026.7.22's Mozilla CA bundle (MPL 2.0);
+see [licenses/certifi-LICENSE.txt](licenses/certifi-LICENSE.txt) and
+[certifi source](https://github.com/certifi/python-certifi).
+Windows HTTPS validation uses truststore 0.10.4 (MIT);
+see [licenses/truststore-MIT.txt](licenses/truststore-MIT.txt).
+Their validation contexts are separate from LAN transport TLS.
+
 ## Optional AI runtime downloads (Windows x64)
 
 The executable offers an optional per-user download; these components are not

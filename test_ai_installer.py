@@ -69,6 +69,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(node, str(root / 'node/node.exe'))
                 env = prepare_environment(data, {'provider':'openai'}, '')
                 self.assertIn(str(root / 'node'), env['PATH'])
+                self.assertEqual(env['NODE_USE_SYSTEM_CA'],'1')
                 import json
                 self.assertEqual(json.loads((data / 'pi/settings.json').read_text())['shellPath'], str(root / 'git/bin/bash.exe'))
 

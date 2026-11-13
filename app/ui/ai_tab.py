@@ -8,17 +8,18 @@ from PyQt6.QtCore import QProcess, QProcessEnvironment, QTimer, Qt, QUrl, pyqtSi
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+    QDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
     QProgressBar, QSplitter, QVBoxLayout, QWidget,
 )
 
-from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINKING_LEVELS,
+from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINKING_LEVELS, RESPONSE_STYLES,
                        application_folder, auth_helper_path, prepare_environment, runtime_command)
 from ..core.history import base_dir
 from ..core.ai_timeline import Timeline, restore_messages
 from ..core.ai_catalog import APIModelCatalog
 from ..core.ai_installer import RuntimeInstaller, runtime_environment, supported
 from .ai_transcript import AITranscript
+from .ai_instructions import InstructionsDialog
 
 
 class AIChatInput(QPlainTextEdit):
@@ -94,6 +95,12 @@ class AITab(QWidget):
 
         self.connection_btn = QPushButton("Подключение модели")
         self.connection_btn.setCheckable(True)
+        self.response_style=QComboBox()
+        for key,(label,_prompt) in RESPONSE_STYLES.items():
+            self.response_style.addItem(label,key)
+        self.response_style.setToolTip('Пояснения агента между этапами работы. Выбор применяется к следующей задаче.')
+        self.instructions_btn=QPushButton('Инструкция…')
+        self.instructions_btn.clicked.connect(self._edit_instructions)
         self.connection_panel = QWidget()
         form = QFormLayout(self.connection_panel)
         self.provider = QComboBox()
@@ -208,7 +215,11 @@ class AITab(QWidget):
         install_buttons.addWidget(self.install_cancel)
         install_layout.addLayout(install_buttons)
         right_layout.addWidget(self.install_panel)
-        right_layout.addWidget(self.connection_btn)
+        connection_header=QHBoxLayout()
+        connection_header.addWidget(self.connection_btn,1)
+        connection_header.addWidget(self.response_style)
+        connection_header.addWidget(self.instructions_btn)
+        right_layout.addLayout(connection_header)
         right_layout.addWidget(self.connection_panel)
         right_layout.addWidget(self.output, 1)
         right_layout.addLayout(footer)
@@ -239,6 +250,7 @@ class AITab(QWidget):
         self.endpoint.setText(self.store.config["endpoint"])
         self.runtime.setText(self.store.config["runtime"])
         self.thinking.setCurrentIndex(max(0, self.thinking.findData(self.store.config["thinking"])))
+        self.response_style.setCurrentIndex(max(0,self.response_style.findData(self.store.config['response_style'])))
         credential = self.vault.load()
         if credential.get("provider") == self.provider.currentData():
             self.key.setText(credential.get("key", ""))
@@ -246,6 +258,7 @@ class AITab(QWidget):
         self.provider.currentIndexChanged.connect(self._provider_changed)
         self.model.currentTextChanged.connect(self._connection_changed)
         self.thinking.currentIndexChanged.connect(self._thinking_changed)
+        self.response_style.currentIndexChanged.connect(self._connection_changed)
         self.endpoint.textChanged.connect(self._connection_changed)
         self.runtime.textChanged.connect(self._connection_changed)
         self.key.textChanged.connect(self._connection_changed)
@@ -371,7 +384,20 @@ class AITab(QWidget):
     def _config(self):
         return {"provider": self.provider.currentData(), "model": self.model.currentText().strip(),
                 "endpoint": self.endpoint.text().strip(), "runtime": self.runtime.text().strip(),
-                "thinking": self.thinking.currentData()}
+                "thinking": self.thinking.currentData(), "response_style": self.response_style.currentData()}
+
+    def _edit_instructions(self):
+        if not self.store or self.rpc.busy or self._pending or self._installing or self._logging_in:
+            return
+        style=self.response_style.currentData()
+        label,default=RESPONSE_STYLES[style]
+        key='instructions_'+style
+        dialog=InstructionsDialog(label,self.store.config[key],default,self)
+        if dialog.exec()==QDialog.DialogCode.Accepted:
+            self.store.config[key]=dialog.editor.toPlainText()
+            self._connection_changed()
+            self._persist_connection()
+        dialog.deleteLater()
 
     def _thinking_changed(self):
         self.thinking_status.setText("Уровень зависит от модели и API; больше размышлений может увеличить время и стоимость.")
@@ -492,6 +518,9 @@ class AITab(QWidget):
                          "--session", self.current["session"], "--no-extensions", "--no-prompt-templates"]
                 if config["thinking"] != "auto":
                     args += ["--thinking", config["thinking"]]
+                instruction=self.store.config['instructions_'+config['response_style']].strip()
+                if instruction:
+                    args += ['--append-system-prompt',instruction]
                 self._pending = text
                 self.status.setText("Запуск локального агента…")
                 self._controls(True)
@@ -527,6 +556,8 @@ class AITab(QWidget):
         self.rpc.send_prompt(text)
 
     def _controls(self, active):
+        self.response_style.setEnabled(not active and not self._logging_in and not self._installing)
+        self.instructions_btn.setEnabled(not active and not self._logging_in and not self._installing)
         self.send_btn.setEnabled(not active and not self._logging_in and not self._installing and bool(self.current) and os.path.normcase(self.current["folder"]) == os.path.normcase(self.work_dir))
         self.stop_btn.setEnabled(active)
         self.new_btn.setEnabled(not active and not self._logging_in and not self._installing)

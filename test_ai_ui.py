@@ -25,6 +25,73 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_two_instruction_modes_are_saved_and_passed_to_next_task(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab=AITab(data_dir=root,work_dir=root)
+            try:
+                self.assertEqual(tab.response_style.count(),2)
+                tab.response_style.setCurrentIndex(tab.response_style.findData('without_explanations'))
+                tab.store.config['instructions_without_explanations']='Custom concise instruction'
+                tab.model.setEditText('test-model')
+                tab.input.setPlainText('task')
+                with patch('app.ui.ai_tab.runtime_command',return_value=('node',['cli'],Path(root,'index.js'))), patch.object(tab.rpc,'start') as start:
+                    tab._send()
+                    args=start.call_args.args[1]
+                    self.assertEqual(args[args.index('--append-system-prompt')+1],'Custom concise instruction')
+                tab._pending=None
+                tab.response_style.setCurrentIndex(tab.response_style.findData('with_explanations'))
+                tab.store.config['instructions_with_explanations']='Custom progress instruction'
+                tab._save_connection()
+            finally:
+                tab.shutdown();tab.close()
+            restored=AITab(data_dir=root,work_dir=root)
+            try:
+                self.assertEqual(restored.response_style.currentData(),'with_explanations')
+                self.assertEqual(restored.store.config['instructions_without_explanations'],'Custom concise instruction')
+                self.assertEqual(restored.store.config['instructions_with_explanations'],'Custom progress instruction')
+                restored._controls(True)
+                self.assertFalse(restored.response_style.isEnabled())
+                self.assertFalse(restored.instructions_btn.isEnabled())
+            finally:
+                restored.shutdown();restored.close()
+
+    def test_instruction_editor_save_cancel_and_reset(self):
+        from app.ui.ai_instructions import InstructionsDialog
+        from PyQt6.QtWidgets import QDialogButtonBox,QDialog
+        dialog=InstructionsDialog('Mode','custom','default')
+        try:
+            dialog.buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).click()
+            self.assertEqual(dialog.editor.toPlainText(),'default')
+            dialog.editor.setPlainText('edited')
+            dialog.buttons.button(QDialogButtonBox.StandardButton.Save).click()
+            self.assertEqual(dialog.result(),QDialog.DialogCode.Accepted)
+            dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel).click()
+            self.assertEqual(dialog.result(),QDialog.DialogCode.Rejected)
+        finally:
+            dialog.close()
+
+    def test_text_and_thinking_render_before_running_tool_finishes(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab=AITab(data_dir=root,work_dir=root)
+            try:
+                tab.show()
+                tab.current['running']=True
+                tab._event({'type':'message_start','message':{'role':'assistant'}})
+                for kind,index,text in [('thinking_delta',0,'Проверяю варианты'),('text_delta',1,'Сначала проверю файлы.')]:
+                    tab._event({'type':'message_update','assistantMessageEvent':{'type':kind,'contentIndex':index,'delta':text}})
+                tab._event({'type':'tool_execution_start','toolCallId':'running-tool','toolName':'bash','args':{'command':'long task'}})
+                wait_for(lambda: 'Сначала проверю файлы.' in tab.output.toPlainText()
+                         and all(row.isVisible() for row in tab.output.rows.values()))
+                self.assertTrue(tab.current['running'])
+                self.assertEqual(tab.current['messages'][-1]['status'],'running')
+                thinking = next(row for row in tab.output.rows.values() if row.role=='thinking')
+                assistant = next(row for row in tab.output.rows.values() if row.role=='assistant')
+                self.assertTrue(thinking.body.isVisible())
+                self.assertTrue(assistant.body.isVisible())
+                self.assertIn('Проверяю варианты',thinking.body.toPlainText())
+            finally:
+                tab.shutdown();tab.close()
+
     def test_installation_blocks_chat_selection_and_runtime_controls(self):
         with tempfile.TemporaryDirectory() as root, patch('app.ui.ai_tab.RuntimeInstaller') as factory:
             factory.return_value.isRunning.return_value = True

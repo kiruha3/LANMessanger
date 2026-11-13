@@ -18,6 +18,7 @@ import uuid
 import zipfile
 
 from PyQt6.QtCore import QLockFile, QThread, pyqtSignal
+from .https import open_url, network_error_message
 
 PI_VERSION = '0.73.1'
 NODE_VERSION = '22.23.5'
@@ -69,7 +70,7 @@ def download(url: str, target: Path, sha256: str, progress, cancel):
     check_cancel(cancel)
     digest = hashlib.sha256()
     request = urllib.request.Request(url, headers={'User-Agent': 'LANMessenger-runtime-installer'})
-    with urllib.request.urlopen(request, timeout=10) as response, target.open('wb') as output:
+    with open_url(request, timeout=10) as response, target.open('wb') as output:
         total = int(response.headers.get('Content-Length', 0))
         size = 0
         while True:
@@ -172,7 +173,8 @@ def runtime_environment() -> dict:
     if not (root / 'node/node.exe').is_file():
         return {}
     paths = [root / 'node', root / 'tools', root / 'git/bin', root / 'git/usr/bin', root / 'git/cmd']
-    return {'PATH': os.pathsep.join([*(str(p) for p in paths), os.environ.get('PATH', '')])}
+    return {'PATH': os.pathsep.join([*(str(p) for p in paths), os.environ.get('PATH', '')]),
+            'NODE_USE_SYSTEM_CA': '1'}
 
 
 def install_runtime(progress, cancel, target: Path | None = None):
@@ -231,6 +233,7 @@ def install_runtime(progress, cancel, target: Path | None = None):
                                 shutil.copy2(item, tools / (item.name if item.suffix == '.exe' else label + '-' + item.name))
             check_cancel(cancel)
             env = dict(os.environ)
+            env['NODE_USE_SYSTEM_CA'] = '1'
             env['PATH'] = os.pathsep.join([str(stage / p) for p in ('node', 'tools', 'git/bin', 'git/usr/bin', 'git/cmd')] + [env.get('PATH', '')])
             # Do not inherit developer global npm configuration or install scripts.
             env['npm_config_cache'] = str(work / 'npm-cache')
@@ -283,6 +286,6 @@ class RuntimeInstaller(QThread):
         try:
             install_runtime(self.progress.emit, self.cancel_event)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(network_error_message(exc))
         else:
             self.succeeded.emit()

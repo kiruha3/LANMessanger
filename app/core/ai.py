@@ -14,6 +14,10 @@ from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSig
 
 
 PI_VERSION = "0.73.1"
+RESPONSE_STYLES = {
+    'with_explanations': ('С пояснениями', 'Перед началом работы и при переходе к новому этапу кратко сообщай пользователю, что собираешься сделать и зачем. Между этапами сообщай существенные результаты. Не комментируй каждую мелочь. В конце кратко опиши результат и проверку.'),
+    'without_explanations': ('Без пояснений', 'Выполняй задачу без промежуточных пояснений к действиям. В конце кратко сообщи результат и важные ограничения. Если без уточнения пользователя продолжить невозможно, задай вопрос.'),
+}
 THINKING_LEVELS = {"auto": "Авто", "off": "Выключены", "minimal": "Минимальный",
                    "low": "Низкий", "medium": "Средний", "high": "Высокий", "xhigh": "Очень высокий"}
 PROVIDERS = {
@@ -65,7 +69,9 @@ class AIStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "state.json"
-        self.config = {"provider": "openai-codex", "model": "", "endpoint": "", "runtime": "", "thinking": "auto"}
+        self.config = {"provider": "openai-codex", "model": "", "endpoint": "", "runtime": "", "thinking": "auto",
+                       "response_style": "with_explanations",
+                       **{'instructions_' + key: prompt for key, (_label, prompt) in RESPONSE_STYLES.items()}}
         self.chats = []
         if self.path.exists():
             try:

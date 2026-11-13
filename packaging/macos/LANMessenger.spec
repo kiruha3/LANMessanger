@@ -13,7 +13,7 @@ a = Analysis(
     binaries=[],
     datas=[(str(root / "app/data/ai_catalog.json"), "app/data"),
            (str(root / "app/core/ai_auth.mjs"), "app/core"),
-           (str(root / "licenses/bb-MIT.txt"), "licenses"),
+           (str(root / "licenses"), "licenses"),
            (str(root / "THIRD_PARTY_NOTICES.md"), ".")],
     hiddenimports=[],
     hookspath=[],

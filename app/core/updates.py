@@ -2,6 +2,7 @@
 import json
 import re
 import urllib.request
+from .https import open_url
 
 API_URL = 'https://api.github.com/repos/kiruha3/LANMessanger/releases/latest'
 
@@ -22,7 +23,7 @@ def release_update(release: dict, current: str):
 
 def fetch_update(current: str):
     request = urllib.request.Request(API_URL, headers={'User-Agent':'LANMessenger-update-check', 'Accept':'application/vnd.github+json'})
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with open_url(request, timeout=10) as response:
         data = response.read(2 * 1024 * 1024 + 1)
     if len(data) > 2 * 1024 * 1024:
         raise ValueError('Слишком большой ответ сервера обновлений')

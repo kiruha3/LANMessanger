@@ -96,7 +96,7 @@ class RealPiTests(unittest.TestCase):
             config = {"provider": "lanmessenger-api", "model": "test-model", "endpoint": f"http://127.0.0.1:{server.server_port}/v1", "thinking": "xhigh"}
             env = prepare_environment(Path(root), config, "local-test-key")
             session = str(Path(root, "session.jsonl"))
-            args = cli + ["--mode", "rpc", "--provider", "lanmessenger-api", "--model", "test-model", "--thinking", "xhigh", "--session", session, "--no-extensions", "--no-skills"]
+            args = cli + ["--mode", "rpc", "--provider", "lanmessenger-api", "--model", "test-model", "--thinking", "xhigh", "--session", session, "--no-extensions", "--no-skills", "--append-system-prompt", "User instruction integration marker"]
             try:
                 rpc.start(program, args, root, env)
                 wait_for(lambda: rpc.ready or errors)
@@ -107,6 +107,7 @@ class RealPiTests(unittest.TestCase):
                 self.assertEqual(Path(root, "agent-proof.txt").read_text(), "created by real Pi")
                 self.assertTrue(any(e.get("type") == "tool_execution_end" for e in events))
                 self.assertEqual(len(server.requests), 2)
+                self.assertTrue(any(m.get('role') in ('system','developer') and 'User instruction integration marker' in str(m.get('content')) for m in server.requests[0]['messages']))
                 self.assertEqual([r.get("reasoning_effort") for r in server.requests], ["xhigh", "xhigh"])
                 for level, expected in (("high", "high"), ("off", "none")):
                     events.clear()
