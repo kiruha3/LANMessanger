@@ -1,6 +1,6 @@
-from PyQt6.QtCore import QRectF, QSize, Qt
+from PyQt6.QtCore import QRect, QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QPainter
-from PyQt6.QtWidgets import QCheckBox
+from PyQt6.QtWidgets import QCheckBox, QSizePolicy
 
 from . import theme
 
@@ -16,6 +16,21 @@ class Switch(QCheckBox):
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def minimumSizeHint(self):
+        return QSize(150, 26)
+
+    def heightForWidth(self, width):
+        text_width = max(1, width - TRACK_W - TEXT_GAP - 6)
+        bounds = self.fontMetrics().boundingRect(QRect(0, 0, text_width, 10000),
+                                                int(Qt.TextFlag.TextWordWrap), self.text())
+        return max(26, bounds.height() + 6)
+
+    def hitButton(self, position):
+        return self.rect().contains(position)
 
     def sizeHint(self) -> QSize:
         w = TRACK_W + (self.fontMetrics().horizontalAdvance(self.text()) + TEXT_GAP
@@ -42,7 +57,7 @@ class Switch(QCheckBox):
             painter.setPen(self.palette().color(self.foregroundRole()))
             painter.drawText(
                 self.rect().adjusted(TRACK_W + TEXT_GAP, 0, 0, 0),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap,
                 self.text(),
             )
         painter.end()

@@ -4,14 +4,19 @@ from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
-    QGroupBox,
+    QFrame,
     QLabel,
+    QLayout,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+from PyQt6.QtCore import Qt
 
 from ..core import autostart
 from . import theme
@@ -36,16 +41,18 @@ def set_shadow_policy(enabled: bool) -> bool:
 
 
 class SettingsDialog(QDialog):
-    """Настройки: общие, сеть, фичефлаги."""
+    """General settings split into scrollable zones; actions stay outside pages."""
 
     def __init__(self, parent: QWidget, engine):
         super().__init__(parent)
         self.engine = engine
         self.setWindowTitle("Настройки")
-        self.setMinimumWidth(340)
+        self.setMinimumSize(320, 220)
+        available = self.screen().availableGeometry()
+        self.resize(min(720, max(320, available.width() - 40)),
+                    min(480, max(240, available.height() - 60)))
 
         # --- общие ---
-        general = QGroupBox("Общие")
         self.autostart_box = Switch("Запускать с Windows")
         self.autostart_box.setChecked(autostart.is_enabled())
         self.theme_box = Switch("Тёмная тема")
@@ -54,33 +61,17 @@ class SettingsDialog(QDialog):
         self.url_edit.setPlaceholderText("Ссылка на новые версии (для уведомлений)")
         self.text_edit = QLineEdit(engine.update_text)
         self.text_edit.setPlaceholderText("Текст уведомления: {name} {ver} {my} {url}")
-        gl = QVBoxLayout(general)
-        gl.addWidget(self.autostart_box)
-        gl.addWidget(self.theme_box)
-        gl.addWidget(QLabel("Ссылка на новые версии:"))
-        gl.addWidget(self.url_edit)
-        gl.addWidget(QLabel("Текст уведомления о версии:"))
-        gl.addWidget(self.text_edit)
 
         # --- сеть ---
-        net = QGroupBox("Сеть")
         self.acceptall_box = Switch("Принимать из любых сетей (VPN/белый IP)")
         self.acceptall_box.setChecked(engine.accept_all())
-        nl = QVBoxLayout(net)
-        nl.addWidget(self.acceptall_box)
 
         # --- шифрование ---
-        enc = QGroupBox("Шифрование")
         self.tls_box = Switch("TLS-канал к узлам (рекомендуется)")
         self.tls_box.setChecked(getattr(engine, "tls_enabled", True))
         self.psk_edit = QLineEdit(getattr(engine, "network_psk", ""))
         self.psk_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.psk_edit.setPlaceholderText("Сетевой пароль (PSK для P2P)")
-        el = QVBoxLayout(enc)
-        el.addWidget(self.tls_box)
-        el.addWidget(QLabel("Сетевой пароль (PSK для P2P):"))
-        el.addWidget(self.psk_edit)
-        el.addWidget(QLabel("Одинаковый у всех участников сети."))
         fps = getattr(engine, "known_fingerprints", None) or {}
         if fps:
             fp_text = "\n".join(f"{key}: {fp[:16]}…" for key, fp in fps.items())
@@ -88,10 +79,8 @@ class SettingsDialog(QDialog):
             fp_text = "нет"
         fp_label = QLabel(f"Известные отпечатки:\n{fp_text}")
         fp_label.setWordWrap(True)
-        el.addWidget(fp_label)
 
         # --- фичефлаги ---
-        feat = QGroupBox("Функции")
         self.rdp_box = Switch("RDP-туннель (кнопка в чате + приём туннелей)")
         self.rdp_box.setChecked(engine.rdp_enabled)
         self.shadow_box = Switch("RDP: совместный сеанс (не выкидывать пользователя)")
@@ -111,19 +100,10 @@ class SettingsDialog(QDialog):
         self.room_join_box.setChecked(getattr(engine, "room_join_enabled", False))
         self.notify_box = Switch("Информационные уведомления (новые версии у узлов)")
         self.notify_box.setChecked(engine.notify_update)
-        self.test_btn = QPushButton("Тест уведомления — как увидят другие")
+        self.test_btn = QPushButton("Проверить уведомление")
+        self.test_btn.setToolTip("Показать уведомление о версии так, как его увидят другие пользователи.")
         self.test_btn.clicked.connect(self._test_notification)
-        fl = QVBoxLayout(feat)
-        fl.addWidget(self.rdp_box)
-        fl.addWidget(self.shadow_box)
-        fl.addWidget(self.shadow_btn)
-        fl.addWidget(self.scan_box)
-        fl.addWidget(self.hub_box)
-        fl.addWidget(self.push_box)
-        fl.addWidget(self.manual_ip_box)
-        fl.addWidget(self.room_join_box)
-        fl.addWidget(self.notify_box)
-        fl.addWidget(self.test_btn)
+        rdp_controls = [self.rdp_box, self.shadow_box, self.shadow_btn]
 
         if sys.platform == "darwin":
             self.autostart_box.setText("Автозапуск (только Windows)")
@@ -134,17 +114,45 @@ class SettingsDialog(QDialog):
             note = QLabel("macOS: RDP, автозапуск и сканер сети пока недоступны. "
                           "Автоматическое обнаружение мессенджеров работает отдельно.")
             note.setWordWrap(True)
-            fl.addWidget(note)
+            rdp_controls.append(note)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
-        buttons.accepted.connect(self._apply)
+        self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self._add_zone("Общие", [self.autostart_box, self.theme_box])
+        self._add_zone("Сеть", [self.acceptall_box, self.scan_box, self.hub_box,
+                                self.manual_ip_box, self.room_join_box])
+        self._add_zone("Защита", [self.tls_box, QLabel("Сетевой пароль (PSK для P2P):"),
+                                  self.psk_edit, QLabel("Одинаковый у всех участников сети."), fp_label])
+        self._add_zone("RDP", rdp_controls)
+        self._add_zone("Уведомления", [self.push_box, self.notify_box,
+                                       QLabel("Ссылка на новые версии:"), self.url_edit,
+                                       QLabel("Текст уведомления о версии:"), self.text_edit, self.test_btn])
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        self.buttons.accepted.connect(self._apply)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(general)
-        layout.addWidget(net)
-        layout.addWidget(enc)
-        layout.addWidget(feat)
-        layout.addWidget(buttons)
+        layout.addWidget(self.tabs, 1)
+        layout.addWidget(self.buttons)
+
+    def _add_zone(self, title, controls):
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setFrameShape(QFrame.Shape.NoFrame)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        for control in controls:
+            if isinstance(control, QLabel):
+                control.setWordWrap(True)
+                control.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            layout.addWidget(control)
+        layout.addStretch(1)
+        page.setWidget(content)
+        self.tabs.addTab(page, title)
 
     def _test_notification(self):
         """Показать, как выглядит уведомление о новой версии у других."""
@@ -169,14 +177,14 @@ class SettingsDialog(QDialog):
 
     def _shadow_btn_update(self):
         if sys.platform == "darwin":
-            self.shadow_btn.setText("Совместное подключение доступно в Windows")
+            self.shadow_btn.setText("Совместный сеанс: только Windows")
             return
         from ..core.tunnel import _shadow_allowed
 
         if _shadow_allowed():
-            self.shadow_btn.setText("Совместное подключение: РАЗРЕШЕНО ✓  (нажать — запретить)")
+            self.shadow_btn.setText("Запретить совместный сеанс")
         else:
-            self.shadow_btn.setText("Совместное подключение: запрещено  (нажать — разрешить)")
+            self.shadow_btn.setText("Разрешить совместный сеанс")
         self.shadow_btn.setToolTip(
             "Политика Shadow в реестре. Изменение через UAC "
             "(права администратора).")

@@ -89,6 +89,65 @@ class PlatformUITests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_general_settings_have_scrollable_zones_and_fixed_ok_button(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QFont
+        from PyQt6.QtWidgets import QScrollArea
+        from app.ui import theme
+        with tempfile.TemporaryDirectory() as tmp, engine_in(Path(tmp), "win32") as engine:
+            engine.known_fingerprints = {f"peer-{i}": "abcdef" * 12 for i in range(50)}
+            dialog = SettingsDialog(None, engine)
+            try:
+                dialog.setFont(QFont("Segoe UI", 10))
+                dialog.setStyleSheet(theme.LIGHT_QSS)
+                dialog.resize(480, 360)
+                dialog.show()
+                for _ in range(10):
+                    self.app.processEvents()
+                self.assertEqual([dialog.tabs.tabText(i) for i in range(dialog.tabs.count())],
+                                 ["Общие", "Сеть", "Защита", "RDP", "Уведомления"])
+                self.assertLessEqual(dialog.height(), 360)
+                self.assertLessEqual(dialog.width(), 480)
+                self.assertLessEqual(dialog.buttons.mapTo(dialog, QPoint()).y() + dialog.buttons.height(), dialog.height())
+                for index in range(dialog.tabs.count()):
+                    dialog.tabs.setCurrentIndex(index)
+                    for _ in range(6):
+                        self.app.processEvents()
+                    page = dialog.tabs.widget(index)
+                    self.assertIsInstance(page, QScrollArea)
+                    self.assertEqual(page.horizontalScrollBar().maximum(), 0, dialog.tabs.tabText(index))
+                    if index == 2:
+                        self.assertGreater(page.verticalScrollBar().maximum(), 0)
+                    page.verticalScrollBar().setValue(page.verticalScrollBar().maximum())
+                    self.assertEqual(page.verticalScrollBar().value(), page.verticalScrollBar().maximum())
+                dialog.tabs.setCurrentIndex(3)
+                for _ in range(6):
+                    self.app.processEvents()
+                self.assertGreaterEqual(dialog.shadow_box.height(), dialog.shadow_box.heightForWidth(dialog.shadow_box.width()))
+            finally:
+                dialog.close()
+
+    def test_settings_keep_edits_when_switching_zones_and_apply_all_tabs(self):
+        with tempfile.TemporaryDirectory() as tmp, engine_in(Path(tmp), "win32") as engine:
+            dialog = SettingsDialog(None, engine)
+            try:
+                dialog.tabs.setCurrentIndex(1)
+                dialog.manual_ip_box.setChecked(True)
+                dialog.tabs.setCurrentIndex(2)
+                dialog.psk_edit.setText("synthetic-network-password")
+                dialog.tabs.setCurrentIndex(4)
+                dialog.url_edit.setText("https://example.invalid/releases")
+                dialog.tabs.setCurrentIndex(0)
+                self.assertTrue(dialog.manual_ip_box.isChecked())
+                self.assertEqual(dialog.psk_edit.text(), "synthetic-network-password")
+                with patch("app.ui.settings_dialog.autostart.enable"), patch("app.ui.settings_dialog.autostart.disable"), patch("app.ui.settings_dialog.theme.apply"):
+                    dialog._apply()
+                self.assertTrue(engine.manual_ip_enabled)
+                self.assertEqual(engine.network_psk, "synthetic-network-password")
+                self.assertEqual(engine.update_url, "https://example.invalid/releases")
+            finally:
+                dialog.close()
+
     def test_mac_ignores_saved_windows_features_and_disables_controls(self):
         with tempfile.TemporaryDirectory() as tmp, engine_in(Path(tmp), "darwin") as engine:
             for feature in ("rdp_enabled", "shadow_rdp", "scan_enabled"):
