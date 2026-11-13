@@ -12,10 +12,11 @@ from PyQt6.QtWidgets import (
     QSplitter, QVBoxLayout, QWidget,
 )
 
-from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS,
+from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINKING_LEVELS,
                        application_folder, auth_helper_path, prepare_environment, runtime_command)
 from ..core.history import base_dir
 from ..core.ai_timeline import Timeline, restore_messages
+from ..core.ai_catalog import APIModelCatalog
 from .ai_transcript import AITranscript
 
 
@@ -41,6 +42,12 @@ class AITab(QWidget):
         self._pending = None
         self.timeline = None
         self._models = []
+        self._api_models = []
+        self._catalog_identity = None
+        self.api_catalog = APIModelCatalog(self)
+        self.api_catalog.loaded.connect(self._api_models_loaded)
+        self.api_catalog.failed.connect(self._catalog_failed)
+        self.api_catalog.busy_changed.connect(self._catalog_busy)
         self._oauth_providers = {"anthropic", "openai-codex", "github-copilot"}
         self._auth_url = ""
         self._logging_in = False
@@ -92,6 +99,11 @@ class AITab(QWidget):
         self.model.setEditable(True)
         self.model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model.lineEdit().setPlaceholderText("Выберите или введите модель")
+        self.thinking = QComboBox()
+        for level, label in THINKING_LEVELS.items():
+            self.thinking.addItem(label, level)
+        self.thinking_status = QLabel("Уровень зависит от модели и API; больше размышлений может увеличить время и стоимость.")
+        self.thinking_status.setWordWrap(True)
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText("API-ключ; для входа по аккаунту оставьте пустым")
@@ -108,7 +120,7 @@ class AITab(QWidget):
         browse = QPushButton("Папка Pi…")
         browse.clicked.connect(self._browse_runtime)
         runtime_row.addWidget(browse)
-        self.catalog_btn = QPushButton("Обновить модели")
+        self.catalog_btn = QPushButton("Загрузить модели")
         self.catalog_btn.clicked.connect(self._catalog_request)
         self.login_btn = QPushButton("Войти в аккаунт")
         self.login_btn.clicked.connect(self._login)
@@ -118,7 +130,7 @@ class AITab(QWidget):
         self.cancel_login_btn.clicked.connect(self._cancel_login)
         self.cancel_login_btn.hide()
         buttons = QHBoxLayout()
-        for button in (self.catalog_btn, self.login_btn, self.logout_btn, self.cancel_login_btn):
+        for button in (self.login_btn, self.logout_btn, self.cancel_login_btn):
             buttons.addWidget(button)
         self.auth_info = QLabel("")
         self.auth_info.setWordWrap(True)
@@ -134,11 +146,16 @@ class AITab(QWidget):
         self.auth_input.hide()
         self.auth_submit.hide()
         form.addRow("Провайдер", self.provider)
-        form.addRow("Модель", self.model)
+        form.addRow("URL API", self.endpoint)
         form.addRow("API-ключ", self.key)
         form.addRow("", self.remember)
         form.addRow("", self.connection_status)
-        form.addRow("Адрес API", self.endpoint)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.model, 1)
+        model_row.addWidget(self.catalog_btn)
+        form.addRow("Модель", model_row)
+        form.addRow("Размышления", self.thinking)
+        form.addRow("", self.thinking_status)
         form.addRow("Runtime", runtime_row)
         form.addRow(buttons)
         form.addRow(self.auth_info)
@@ -148,6 +165,7 @@ class AITab(QWidget):
         self.connection_btn.toggled.connect(self.connection_panel.setVisible)
 
         self.output = AITranscript(self.work_dir)
+        self.output.welcome.connect_requested.connect(self._open_connection)
         self.input = AIChatInput()
         self.input.setPlaceholderText("Задача для агента. Enter — отправить, Shift+Enter — новая строка")
         self.input.setMaximumHeight(95)
@@ -194,17 +212,20 @@ class AITab(QWidget):
         self.model.setEditText(self.store.config["model"])
         self.endpoint.setText(self.store.config["endpoint"])
         self.runtime.setText(self.store.config["runtime"])
+        self.thinking.setCurrentIndex(max(0, self.thinking.findData(self.store.config["thinking"])))
         credential = self.vault.load()
         if credential.get("provider") == self.provider.currentData():
             self.key.setText(credential.get("key", ""))
             self.remember.setChecked(bool(credential.get("key")))
         self.provider.currentIndexChanged.connect(self._provider_changed)
         self.model.currentTextChanged.connect(self._connection_changed)
+        self.thinking.currentIndexChanged.connect(self._thinking_changed)
         self.endpoint.textChanged.connect(self._connection_changed)
         self.runtime.textChanged.connect(self._connection_changed)
         self.key.textChanged.connect(self._connection_changed)
         self.remember.toggled.connect(self._schedule_connection_save)
         self._last_provider = self.provider.currentData()
+        self._catalog_identity = self._discovery_identity()
         if not self.store.chats:
             self.store.new_chat(self.work_dir)
         self._fill_chats()
@@ -248,12 +269,48 @@ class AITab(QWidget):
 
     def _config(self):
         return {"provider": self.provider.currentData(), "model": self.model.currentText().strip(),
-                "endpoint": self.endpoint.text().strip(), "runtime": self.runtime.text().strip()}
+                "endpoint": self.endpoint.text().strip(), "runtime": self.runtime.text().strip(),
+                "thinking": self.thinking.currentData()}
+
+    def _thinking_changed(self):
+        self.thinking_status.setText("Уровень зависит от модели и API; больше размышлений может увеличить время и стоимость.")
+        self._connection_changed()
 
     def _connection_changed(self, *_args):
+        identity = self._discovery_identity()
+        if identity != self._catalog_identity:
+            self._catalog_identity = identity
+            self.api_catalog.cancel()
+            self._api_models = []
+            if self.provider.currentData() == "lanmessenger-api":
+                self._fill_models(self.model.currentText())
+                self.auth_info.setText("Укажите URL и ключ, затем нажмите «Загрузить модели». ID можно ввести вручную.")
         if not self.rpc.busy and not self._pending:
             self.rpc.shutdown()
         self._schedule_connection_save()
+
+    def _discovery_identity(self):
+        return (self.provider.currentData(), self.endpoint.text().strip(), self.key.text().strip())
+
+    def _open_connection(self):
+        self.connection_btn.setChecked(True)
+        (self.endpoint if self.provider.currentData() == "lanmessenger-api" else self.provider).setFocus()
+
+    def _catalog_busy(self, busy):
+        self.catalog_btn.setEnabled(not busy and not self._logging_in)
+        self.catalog_btn.setText("Загрузка…" if busy else "Загрузить модели")
+
+    def _catalog_failed(self, text):
+        if not self._closed:
+            self.auth_info.setText(text)
+
+    def _api_models_loaded(self, models):
+        if self._closed or self.provider.currentData() != "lanmessenger-api":
+            return
+        self._api_models = models
+        self._fill_models(self.model.currentText())
+        self._schedule_connection_save()
+        self.auth_info.setText(f"API вернул моделей: {len(models)}. Выберите точный ID в списке или введите его вручную.")
 
     def _schedule_connection_save(self, *_args):
         if self.store and not self._closed:
@@ -318,11 +375,13 @@ class AITab(QWidget):
             config = self._save_connection()
             if not self.rpc.ready:
                 if not config["model"]:
-                    raise ValueError("Выберите модель в «Подключение модели» или нажмите «Обновить модели».")
+                    raise ValueError("Выберите модель в «Подключение модели» или нажмите «Загрузить модели».")
                 program, args, _module = runtime_command(config["runtime"])
                 env = prepare_environment(self.store.root, config, self.key.text().strip())
                 args += ["--mode", "rpc", "--provider", config["provider"], "--model", config["model"],
                          "--session", self.current["session"], "--no-extensions", "--no-prompt-templates"]
+                if config["thinking"] != "auto":
+                    args += ["--thinking", config["thinking"]]
                 self._pending = text
                 self.status.setText("Запуск локального агента…")
                 self._controls(True)
@@ -402,6 +461,16 @@ class AITab(QWidget):
             return
         kind = event.get("type")
         messages = self.current["messages"]
+        if kind == "response" and event.get("command") == "get_state" and event.get("success"):
+            effective = event.get("data", {}).get("thinkingLevel")
+            if effective in THINKING_LEVELS:
+                requested = self.thinking.currentData()
+                text = f"Уровень Pi: {THINKING_LEVELS[effective]}."
+                if requested != "auto" and requested != effective:
+                    text += f" Запрошен: {THINKING_LEVELS[requested]}; Pi ограничил уровень возможностями модели."
+                elif self.provider.currentData() == "lanmessenger-api" and requested != "auto":
+                    text += " Поддержку параметра reasoning_effort проверяет ваш сервер API."
+                self.thinking_status.setText(text)
         if kind == "response" and event.get("command") == "get_messages" and event.get("success"):
             restored = restore_messages(event.get("data", {}).get("messages", []), self.rpc.redact)
             lost_context = bool(messages) and not restored
@@ -469,6 +538,11 @@ class AITab(QWidget):
         if self._logging_in or not self.store:
             return
         try:
+            if self.provider.currentData() == "lanmessenger-api":
+                self._persist_connection()
+                self.api_catalog.fetch(self.endpoint.text(), self.key.text())
+                self.auth_info.setText("Загрузка моделей из указанного API…")
+                return
             self._start_auth()
             self._auth_command({"type": "list"})
             self.auth_info.setText("Загрузка списка моделей…")
@@ -511,6 +585,8 @@ class AITab(QWidget):
             if kind == "catalog":
                 self._models = event.get("models", [])
                 self._oauth_providers = {p["id"] for p in event.get("providers", [])}
+                if self.provider.currentData() == "lanmessenger-api":
+                    continue
                 self._fill_models(self.model.currentText())
                 logged = self.provider.currentData() in event.get("authenticated", [])
                 self.auth_info.setText("Аккаунт подключён." if logged else "Модели загружены. Войдите в аккаунт или введите API-ключ.")
@@ -543,8 +619,21 @@ class AITab(QWidget):
         provider = self.provider.currentData()
         self.model.blockSignals(True)
         self.model.clear()
-        models = sorted({m["id"] for m in self._models if m["provider"] == provider})
-        self.model.addItems(models)
+        if provider == "lanmessenger-api":
+            models = sorted(self._api_models, key=lambda m: (m.get("owner", ""), m["id"]))
+            owner = None
+            for model in models:
+                group = model.get("owner") or "Другие модели"
+                if owner != group:
+                    self.model.addItem(group)
+                    self.model.model().item(self.model.count() - 1).setEnabled(False)
+                    owner = group
+                self.model.addItem(model["id"])
+            first = next((i for i in range(self.model.count()) if self.model.model().item(i).isEnabled()), -1)
+            self.model.setCurrentIndex(first)
+        else:
+            models = sorted({m["id"] for m in self._models if m["provider"] == provider})
+            self.model.addItems(models)
         if selected:
             self.model.setEditText(selected)
         elif not models:
@@ -603,6 +692,7 @@ class AITab(QWidget):
         self._connection_save_timer.stop()
         self._persist_connection()
         self._closed = True
+        self.api_catalog.cancel()
         self._render_timer.stop()
         self._save_timer.stop()
         self._pending = None

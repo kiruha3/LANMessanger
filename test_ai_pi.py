@@ -65,10 +65,10 @@ class RealPiTests(unittest.TestCase):
             events, errors = [], []
             rpc.received.connect(events.append)
             rpc.error.connect(errors.append)
-            config = {"provider": "lanmessenger-api", "model": "test-model", "endpoint": f"http://127.0.0.1:{server.server_port}/v1"}
+            config = {"provider": "lanmessenger-api", "model": "test-model", "endpoint": f"http://127.0.0.1:{server.server_port}/v1", "thinking": "xhigh"}
             env = prepare_environment(Path(root), config, "local-test-key")
             session = str(Path(root, "session.jsonl"))
-            args = cli + ["--mode", "rpc", "--provider", "lanmessenger-api", "--model", "test-model", "--session", session, "--no-extensions", "--no-skills"]
+            args = cli + ["--mode", "rpc", "--provider", "lanmessenger-api", "--model", "test-model", "--thinking", "xhigh", "--session", session, "--no-extensions", "--no-skills"]
             try:
                 rpc.start(program, args, root, env)
                 wait_for(lambda: rpc.ready or errors)
@@ -79,6 +79,16 @@ class RealPiTests(unittest.TestCase):
                 self.assertEqual(Path(root, "agent-proof.txt").read_text(), "created by real Pi")
                 self.assertTrue(any(e.get("type") == "tool_execution_end" for e in events))
                 self.assertEqual(len(server.requests), 2)
+                self.assertEqual([r.get("reasoning_effort") for r in server.requests], ["xhigh", "xhigh"])
+                for level, expected in (("high", "high"), ("off", "none")):
+                    events.clear()
+                    rpc.command({"type": "set_thinking_level", "level": level})
+                    wait_for(lambda: any(e.get("command") == "set_thinking_level" for e in events) or errors)
+                    self.assertEqual(errors, [])
+                    rpc.send_prompt("Проверка уровня размышлений")
+                    wait_for(lambda: any(e.get("type") == "agent_end" for e in events) or errors)
+                    self.assertEqual(errors, [])
+                    self.assertEqual(server.requests[-1].get("reasoning_effort"), expected)
                 rpc.shutdown()
                 events.clear()
                 rpc.start(program, args, root, env)
@@ -87,8 +97,8 @@ class RealPiTests(unittest.TestCase):
                 rpc.command({"type": "get_messages"})
                 wait_for(lambda: any(e.get("command") == "get_messages" for e in events))
                 messages = next(e["data"]["messages"] for e in events if e.get("command") == "get_messages")
-                self.assertEqual(sum(m.get("role") == "user" for m in messages), 1)
-                self.assertEqual(len(server.requests), 2)
+                self.assertEqual(sum(m.get("role") == "user" for m in messages), 3)
+                self.assertEqual(len(server.requests), 4)
                 self.assertTrue(Path(session).exists())
             finally:
                 rpc.shutdown()

@@ -1,0 +1,257 @@
+{
+  "source": "catalog-tariffs.xlsx",
+  "date": "2026-11-13",
+  "currency": "RUB",
+  "unit": "1 million tokens",
+  "sections": [
+    {
+      "title": "OpenAI",
+      "models": [
+        {
+          "name": "GPT-6 Astra",
+          "provider": "OpenAI",
+          "input": 800,
+          "cache": 80,
+          "output": 4000,
+          "use": "Для сложной задачи с большим бюджетом; сначала сравните результат на своём примере."
+        },
+        {
+          "name": "GPT-6 Luna",
+          "provider": "OpenAI",
+          "input": 8,
+          "cache": 0.8,
+          "output": 40,
+          "use": "Для коротких вопросов, черновиков и пробных запусков с небольшим бюджетом."
+        },
+        {
+          "name": "GPT-6 Sol",
+          "provider": "OpenAI",
+          "input": 160,
+          "cache": 16,
+          "output": 800,
+          "use": "Для повседневных задач с текстом и кодом; проверьте поддержку инструментов вашим API."
+        },
+        {
+          "name": "GPT-6.1 Sol",
+          "provider": "OpenAI",
+          "input": 160,
+          "cache": 8,
+          "output": 800,
+          "use": "Для повседневной работы с текстом и кодом; кеш может снизить стоимость повторяемого контекста."
+        },
+        {
+          "name": "GPT-6.1 Terra",
+          "provider": "OpenAI",
+          "input": 80,
+          "cache": 4,
+          "output": 400,
+          "use": "Для задач с текстом и кодом при умеренном бюджете; сравните с Sol на своей задаче."
+        }
+      ]
+    },
+    {
+      "title": "Anthropic",
+      "models": [
+        {
+          "name": "Claude Fable 5.1",
+          "provider": "Anthropic",
+          "input": 900,
+          "cache": 22.5,
+          "output": 4500,
+          "use": "Для экспериментов со сложными запросами при высоком бюджете."
+        },
+        {
+          "name": "Claude Fable 5.2",
+          "provider": "Anthropic",
+          "input": 720,
+          "cache": 18,
+          "output": 3600,
+          "use": "Для экспериментов со сложными запросами; сравните с Fable 5.1 по результату и цене."
+        },
+        {
+          "name": "Claude Haiku 5.5",
+          "provider": "Anthropic",
+          "input": 9,
+          "cache": 0.9,
+          "output": 45,
+          "use": "Для коротких запросов, черновиков и недорогих пробных запусков."
+        },
+        {
+          "name": "Claude Opus 5.5",
+          "provider": "Anthropic",
+          "input": 360,
+          "cache": 18,
+          "output": 1800,
+          "use": "Для подробного разбора текста или кода; сначала оцените стоимость на небольшой задаче."
+        },
+        {
+          "name": "Claude Sonnet 5.5",
+          "provider": "Anthropic",
+          "input": 180,
+          "cache": 9,
+          "output": 900,
+          "use": "Для повседневных задач с текстом и кодом; агенту нужна поддержка инструментов."
+        }
+      ]
+    },
+    {
+      "title": "Google",
+      "models": [
+        {
+          "name": "Gemini 3 Flash Preview",
+          "provider": "Google",
+          "input": 50,
+          "cache": 5,
+          "output": 300,
+          "use": "Для повседневных текстовых запросов; сравните результат и стоимость на своей задаче. Preview — проверяйте доступность и стабильность у своего провайдера."
+        },
+        {
+          "name": "Gemini 3.1 Flash Lite",
+          "provider": "Google",
+          "input": 25,
+          "cache": 2.5,
+          "output": 150,
+          "use": "Для коротких текстовых задач и пробных запусков с небольшим бюджетом."
+        },
+        {
+          "name": "Gemini 3.1 Flash Lite Preview",
+          "provider": "Google",
+          "input": 25,
+          "cache": 2.5,
+          "output": 150,
+          "use": "Для коротких текстовых задач и пробных запусков с небольшим бюджетом. Preview — проверяйте доступность и стабильность у своего провайдера."
+        },
+        {
+          "name": "Gemini 3.1 Pro Preview",
+          "provider": "Google",
+          "input": 200,
+          "cache": 20,
+          "output": 1200,
+          "use": "Для подробных текстовых запросов и сравнения ответов на своей задаче. Preview — проверяйте доступность и стабильность у своего провайдера."
+        },
+        {
+          "name": "Gemini 3.1 Pro Preview Custom Tools",
+          "provider": "Google",
+          "input": 200,
+          "cache": 20,
+          "output": 1200,
+          "use": "Для проверки сценариев с инструментами; доступность функций зависит от API. Preview — проверяйте доступность и стабильность у своего провайдера."
+        },
+        {
+          "name": "Gemini 3.5 Flash",
+          "provider": "Google",
+          "input": 150,
+          "cache": 15,
+          "output": 900,
+          "use": "Для повседневных текстовых запросов; сравните результат и стоимость на своей задаче."
+        },
+        {
+          "name": "Gemini 3.5 Flash Lite",
+          "provider": "Google",
+          "input": 30,
+          "cache": 3,
+          "output": 250,
+          "use": "Для коротких текстовых задач и пробных запусков с небольшим бюджетом."
+        },
+        {
+          "name": "Gemini 3.6 Flash",
+          "provider": "Google",
+          "input": 75,
+          "cache": 7.5,
+          "output": 375,
+          "use": "Для повседневных текстовых запросов; сравните результат и стоимость на своей задаче."
+        },
+        {
+          "name": "Gemini 3.7 Flash",
+          "provider": "Google",
+          "input": 75,
+          "cache": 7.5,
+          "output": 375,
+          "use": "Для повседневных текстовых запросов; сравните результат и стоимость на своей задаче."
+        },
+        {
+          "name": "Gemini 3.8 Flash",
+          "provider": "Google",
+          "input": 82.5,
+          "cache": 8.25,
+          "output": 412.5,
+          "use": "Для повседневных текстовых запросов; сравните результат и стоимость на своей задаче."
+        },
+        {
+          "name": "Gemini 4 Argon",
+          "provider": "Google",
+          "input": 200,
+          "cache": 10,
+          "output": 1000,
+          "use": "Для подробных текстовых запросов и сравнения ответов на своей задаче."
+        },
+        {
+          "name": "Gemini 4 Carbon",
+          "provider": "Google",
+          "input": 200,
+          "cache": 10,
+          "output": 1000,
+          "use": "Для подробных текстовых запросов и сравнения ответов на своей задаче."
+        }
+      ]
+    },
+    {
+      "title": "Google — изображения",
+      "models": [
+        {
+          "name": "Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
+          "provider": "Google",
+          "input": 50,
+          "cache": 0,
+          "output": 300,
+          "use": "Для генерации и редактирования изображений в совместимом сервисе. В этом агентском чате генерация изображений не подключена."
+        },
+        {
+          "name": "Nano Banana 2 (Gemini 3.1 Flash Image)",
+          "provider": "Google",
+          "input": 50,
+          "cache": 0,
+          "output": 300,
+          "use": "Для генерации и редактирования изображений в совместимом сервисе. В этом агентском чате генерация изображений не подключена."
+        },
+        {
+          "name": "Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)",
+          "provider": "Google",
+          "input": 25,
+          "cache": 0,
+          "output": 150,
+          "use": "Для генерации и редактирования изображений в совместимом сервисе. В этом агентском чате генерация изображений не подключена."
+        },
+        {
+          "name": "Nano Banana Pro (Gemini 3 Pro Image Preview)",
+          "provider": "Google",
+          "input": 200,
+          "cache": 20,
+          "output": 1200,
+          "use": "Для генерации и редактирования изображений в совместимом сервисе. В этом агентском чате генерация изображений не подключена."
+        },
+        {
+          "name": "Nano Banana Pro (Gemini 3 Pro Image)",
+          "provider": "Google",
+          "input": 200,
+          "cache": 20,
+          "output": 1200,
+          "use": "Для генерации и редактирования изображений в совместимом сервисе. В этом агентском чате генерация изображений не подключена."
+        }
+      ]
+    },
+    {
+      "title": "xAI",
+      "models": [
+        {
+          "name": "Grok 4.7",
+          "provider": "xAI",
+          "input": 200,
+          "cache": 50,
+          "output": 600,
+          "use": "Для альтернативного ответа и сравнения подходов к текстовым задачам."
+        }
+      ]
+    }
+  ]
+}

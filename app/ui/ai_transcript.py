@@ -11,6 +11,7 @@ from PyQt6.QtGui import QColor, QDesktopServices, QTextCharFormat, QTextCursor, 
 from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QSizePolicy, QTextBrowser, QToolButton, QVBoxLayout, QWidget
 
 from . import theme
+from .ai_welcome import AIWelcome
 
 
 STATUS = {"queued": "Ожидает", "running": "Выполняется…", "completed": "Завершено",
@@ -177,6 +178,9 @@ class AITranscript(QScrollArea):
         self.layout = QVBoxLayout(self.container)
         self.layout.setContentsMargins(4, 4, 4, 4)
         self.layout.setSpacing(8)
+        self.welcome = AIWelcome()
+        self.welcome.expansion_changed.connect(self._expanding)
+        self.layout.addWidget(self.welcome)
         self.layout.addStretch(1)
         self.setWidget(self.container)
         self.verticalScrollBar().rangeChanged.connect(self._range_changed)
@@ -193,6 +197,13 @@ class AITranscript(QScrollArea):
             self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
     def set_messages(self, messages, scroll_to_end=True):
+        welcome_visible = not any(m.get("role") == "user" for m in messages)
+        returning_to_welcome = welcome_visible and self.welcome.isHidden()
+        self.welcome.setVisible(welcome_visible)
+        if welcome_visible:
+            self._follow_end = False
+            if returning_to_welcome:
+                self.verticalScrollBar().setValue(0)
         visible = [message for message in messages
                    if message.get("role") == "tool" or message.get("text", "").strip()]
         order = [message["id"] for message in visible]
@@ -212,9 +223,9 @@ class AITranscript(QScrollArea):
             else:
                 changed = row.update_message(message) or changed
             if order != self._order:
-                self.layout.insertWidget(index, row)
+                self.layout.insertWidget(index + 1, row)
         self._order = order
-        if changed and scroll_to_end:
+        if changed and scroll_to_end and not welcome_visible:
             self._follow_end = True
             self.layout.activate()
             self._scroll_to_end()

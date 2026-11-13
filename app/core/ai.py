@@ -14,6 +14,8 @@ from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSig
 
 
 PI_VERSION = "0.73.1"
+THINKING_LEVELS = {"auto": "Авто", "off": "Выключены", "minimal": "Минимальный",
+                   "low": "Низкий", "medium": "Средний", "high": "Высокий", "xhigh": "Очень высокий"}
 PROVIDERS = {
     "openai": ("OpenAI — API", "OPENAI_API_KEY"),
     "openai-codex": ("OpenAI — аккаунт ChatGPT", ""),
@@ -63,7 +65,7 @@ class AIStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "state.json"
-        self.config = {"provider": "openai-codex", "model": "", "endpoint": "", "runtime": ""}
+        self.config = {"provider": "openai-codex", "model": "", "endpoint": "", "runtime": "", "thinking": "auto"}
         self.chats = []
         if self.path.exists():
             try:
@@ -190,9 +192,15 @@ def prepare_environment(root: Path, config: dict, key: str) -> dict:
         model = config.get("model", "").strip()
         if not model:
             raise ValueError("Укажите идентификатор модели")
+        thinking = config.get("thinking", "auto")
+        if thinking not in THINKING_LEVELS:
+            raise ValueError("Неизвестный уровень размышлений")
+        model_definition = {"id": model, "contextWindow": 128000, "maxTokens": 16384}
+        if thinking != "auto":
+            model_definition.update(reasoning=True, thinkingLevelMap={"off": "none", "xhigh": "xhigh"})
         models = {"providers": {"lanmessenger-api": {"baseUrl": endpoint, "api": "openai-completions",
                   "apiKey": "LANMESSENGER_AI_KEY", "authHeader": True,
-                  "models": [{"id": model, "contextWindow": 128000, "maxTokens": 16384}]}}}
+                  "models": [model_definition]}}}
         (agent / "models.json").write_text(json.dumps(models), encoding="utf-8")
     return env
 

@@ -25,6 +25,91 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_reasoning_level_saved_passed_to_pi_and_effective_level_shown(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertEqual(tab.thinking.currentData(), "auto")
+                tab.thinking.setCurrentIndex(tab.thinking.findData("xhigh"))
+                tab.model.setEditText("fake-model")
+                tab.input.setPlainText("hello")
+                with patch("app.ui.ai_tab.runtime_command", return_value=("fake-node", ["cli.js"], Path("fake.js"))), patch.object(tab.rpc, "start") as start:
+                    tab.send_btn.click()
+                    args = start.call_args.args[1]
+                    self.assertEqual(args[args.index("--thinking") + 1], "xhigh")
+                tab._event({"type": "response", "command": "get_state", "success": True,
+                            "data": {"thinkingLevel": "high", "model": {"reasoning": True}}})
+                self.assertIn("Высокий", tab.thinking_status.text())
+                self.assertIn("Очень высокий", tab.thinking_status.text())
+            finally:
+                tab.shutdown()
+                tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertEqual(restored.thinking.currentData(), "xhigh")
+            finally:
+                restored.shutdown()
+                restored.close()
+
+    def test_welcome_is_ui_only_and_returns_for_new_chat(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertFalse(tab.output.welcome.isHidden())
+                self.assertEqual(tab.current["messages"], [])
+                self.assertEqual(tab.output.toPlainText(), "")
+                tab.output.welcome.connect_btn.click()
+                self.assertTrue(tab.connection_btn.isChecked())
+                tab.current["messages"].append({"role": "user", "text": "hello"})
+                tab._render()
+                self.assertTrue(tab.output.welcome.isHidden())
+                self.assertEqual(tab.output.layout.indexOf(next(iter(tab.output.rows.values()))), 1)
+                tab._new_chat()
+                self.assertFalse(tab.output.welcome.isHidden())
+                self.assertEqual(tab.current["messages"], [])
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_reference_catalog_sections_and_zero_prices(self):
+        from app.ui.ai_welcome import load_catalog
+        catalog = load_catalog()
+        models = [m for section in catalog["sections"] for m in section["models"]]
+        self.assertEqual(len(models), 28)
+        self.assertEqual([s["title"] for s in catalog["sections"]],
+                         ["OpenAI", "Anthropic", "Google", "Google — изображения", "xAI"])
+        terra = next(m for m in models if m["name"] == "GPT-6.1 Terra")
+        self.assertEqual([terra[k] for k in ("input", "cache", "output")], [80, 4, 400])
+        self.assertEqual(sum(m["cache"] == 0 for m in models), 3)
+        self.assertTrue(all(m["use"] for m in models))
+
+    def test_custom_discovery_groups_exact_ids_and_invalidates_on_credentials_change(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+                tab.endpoint.setText("https://example.org/v1")
+                tab.key.setText("synthetic-key")
+                tab.model.setEditText("manual-id")
+                with patch.object(tab.api_catalog, "fetch") as fetch:
+                    tab.catalog_btn.click()
+                    fetch.assert_called_once_with("https://example.org/v1", "synthetic-key")
+                tab.api_catalog.loaded.emit([{"id": "exact/id", "owner": "owner"}])
+                self.assertEqual(tab.model.currentText(), "manual-id")
+                self.assertGreaterEqual(tab.model.findText("exact/id"), 0)
+                self.assertFalse(tab.model.model().item(0).isEnabled())
+                tab.model.setCurrentIndex(tab.model.findText("exact/id"))
+                self.assertGreaterEqual(tab.model.findText("exact/id"), 0)
+                tab.key.setText("new-key")
+                self.assertEqual(tab.model.count(), 0)
+                self.assertEqual(tab.model.currentText(), "exact/id")
+                tab.api_catalog.failed.emit("Unavailable; enter manually")
+                self.assertTrue(tab.model.isEditable())
+                self.assertIn("manually", tab.auth_info.text())
+            finally:
+                tab.shutdown()
+                tab.close()
+
     def test_trailing_whitespace_does_not_expand_streamed_message(self):
         with tempfile.TemporaryDirectory() as root:
             tab = AITab(data_dir=root, work_dir=root)
@@ -132,6 +217,7 @@ class AITabTests(unittest.TestCase):
             tab.show()
             try:
                 tab.current["messages"].extend([
+                    {"id": "user", "role": "user", "text": "Read history"},
                     {"id": "tool", "role": "tool", "text": "read\n{}", "result": "history\n" * 60},
                     {"id": "text", "role": "assistant", "text": "line\n\n" * 80}])
                 tab._render()
