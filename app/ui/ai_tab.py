@@ -461,8 +461,6 @@ class AITab(QWidget):
         if not self.current:
             return
         scroll = self.output.verticalScrollBar()
-        near_bottom = scroll.maximum() - scroll.value() < 60
-        old_scroll = scroll.value()
         colors = theme.bubbles()
         sections = []
         labels = {"user": "Вы", "assistant": "Агент", "tool": "Действие", "system": "Состояние"}
@@ -472,7 +470,7 @@ class AITab(QWidget):
                 text += "<br>" + html.escape(message.get("result", "")).replace("\n", "<br>")
             sections.append(f'<p><b style="color:{colors["accent"]}">{labels.get(message.get("role"), "Сообщение")}</b><br>{text}</p>')
         self.output.setHtml(f'<body style="color:{colors["text"]}">' + "".join(sections) + "</body>")
-        scroll.setValue(scroll.maximum() if near_bottom else old_scroll)
+        scroll.setValue(scroll.maximum())
 
     def _start_auth(self):
         if self.auth.state() != QProcess.ProcessState.NotRunning:
