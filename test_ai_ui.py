@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 from app.ui.ai_tab import AITab
 
 APP = QApplication.instance() or QApplication([])
@@ -25,6 +26,247 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_pinned_chat_stays_above_newer_chats_and_pin_menu_and_restart_preserve_selection(self):
+        from PyQt6.QtWidgets import QMenu
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.show()
+            try:
+                old = tab.current
+                old["last_activity"] = 10
+                tab._new_chat()
+                new = tab.current
+                new["last_activity"] = 20
+                tab._fill_chats()
+                group = tab.chat_list.topLevelItem(0)
+                item = next(group.child(index) for index in range(group.childCount())
+                            if group.child(index).data(0, Qt.ItemDataRole.UserRole) == old["id"])
+                tab._chat_context_menu(tab.chat_list.visualItemRect(item).center())
+                menu = next(menu for menu in tab.chat_list.findChildren(QMenu) if menu.actions())
+                self.assertEqual(menu.actions()[0].text(), "Закрепить чат")
+                menu.actions()[0].trigger()
+                menu.close()
+                self.assertTrue(old["pinned"])
+                group = tab.chat_list.topLevelItem(0)
+                self.assertEqual(group.child(0).data(0, Qt.ItemDataRole.UserRole), old["id"])
+                self.assertEqual(tab.current["id"], new["id"])
+                self.assertIn("Закреплён", group.child(0).toolTip(0))
+                tab.shutdown()
+            finally:
+                tab.shutdown(); tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                group = restored.chat_list.topLevelItem(0)
+                self.assertEqual(group.child(0).data(0, Qt.ItemDataRole.UserRole), old["id"])
+                restored._toggle_chat_pin(old["id"])
+                group = restored.chat_list.topLevelItem(0)
+                self.assertEqual(group.child(0).data(0, Qt.ItemDataRole.UserRole), new["id"])
+                self.assertEqual(restored.current["id"], new["id"])
+            finally:
+                restored.shutdown(); restored.close()
+
+    def test_unexpected_ai_callback_error_interrupts_only_its_task_and_saves_redacted_diagnostics(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab._run().config = dict(tab.store.config)
+                tab._run().sent_images = []
+                tab._begin_task("test callback")
+                background = tab._run()
+                background.key = "callback-private-key"
+                tab._new_chat()
+                other = tab._run()
+                other.chat["running"] = True
+                background.rpc.received.emit({"type": "tool_execution_end", "toolCallId": "bad-result",
+                                              "toolName": "get_image_status", "result": {"content": None}})
+                self.assertEqual(background.chat["outcome"], "failed")
+                self.assertFalse(background.chat["running"])
+                self.assertTrue(other.chat["running"])
+                self.assertIs(tab.current, other.chat)
+                self.assertIsNone(tab._event_run)
+                self.assertIn("Внутренняя ошибка", background.chat["last_error"])
+                diagnostic = Path(root, "errors.log").read_text(encoding="utf-8")
+                self.assertIn("TypeError", diagnostic)
+                self.assertNotIn(background.key, diagnostic)
+            finally:
+                tab.shutdown(); tab.close()
+
+    def test_chat_list_orders_latest_messages_first_without_reordering_on_open_and_restores(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                old = tab.current
+                old["last_activity"] = 10
+                tab._new_chat()
+                new = tab.current
+                new["last_activity"] = 20
+                tab._fill_chats()
+
+                def order():
+                    group = tab.chat_list.topLevelItem(0)
+                    return [group.child(index).data(0, Qt.ItemDataRole.UserRole) for index in range(group.childCount())]
+
+                self.assertEqual(order(), [new["id"], old["id"]])
+                tab._select_chat(tab.store.chats.index(old))
+                self.assertEqual(order(), [new["id"], old["id"]])
+                tab._run().sent_images = []
+                with patch("app.ui.ai_tab.time.time", return_value=30):
+                    tab._begin_task("новое сообщение")
+                self.assertEqual(order(), [old["id"], new["id"]])
+                self.assertEqual(tab.current["id"], old["id"])
+                tab.current["running"] = False
+                tab.shutdown()
+            finally:
+                tab.shutdown(); tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                group = restored.chat_list.topLevelItem(0)
+                self.assertEqual(group.child(0).data(0, Qt.ItemDataRole.UserRole), old["id"])
+                self.assertEqual(group.child(1).data(0, Qt.ItemDataRole.UserRole), new["id"])
+            finally:
+                restored.shutdown(); restored.close()
+
+    def test_chat_list_pulses_running_tasks_highlights_unread_results_and_restores_them(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.show()
+            try:
+                tab._run().config = dict(tab.store.config)
+                tab._begin_task("Фоновая задача")
+                background = tab._run()
+                tab._new_chat()
+                group = tab.chat_list.topLevelItem(0)
+                item = next(group.child(i) for i in range(group.childCount())
+                            if group.child(i).data(0, Qt.ItemDataRole.UserRole) == background.chat["id"])
+                self.assertEqual(item.data(0, Qt.ItemDataRole.UserRole + 1), "running")
+                self.assertIn("работает", item.text(0))
+                self.assertTrue(tab._chat_pulse_timer.isActive())
+                before = item.icon(0).pixmap(14, 14).toImage()
+                tab._pulse_running_chats()
+                self.assertNotEqual(before, item.icon(0).pixmap(14, 14).toImage())
+                tab._dispatch_run(background, tab._event, {"type": "agent_end"})
+                group = tab.chat_list.topLevelItem(0)
+                item = next(group.child(i) for i in range(group.childCount())
+                            if group.child(i).data(0, Qt.ItemDataRole.UserRole) == background.chat["id"])
+                self.assertEqual(item.data(0, Qt.ItemDataRole.UserRole + 1), "ready")
+                self.assertIn("готово", item.text(0))
+                self.assertTrue(item.font(0).bold())
+                self.assertFalse(tab._chat_pulse_timer.isActive())
+                self.assertTrue(background.chat["unread_result"])
+                background_id = background.chat["id"]
+            finally:
+                tab.shutdown(); tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                chat = next(c for c in restored.store.chats if c["id"] == background_id)
+                self.assertTrue(chat["unread_result"])
+                restored._select_chat(restored.store.chats.index(chat))
+                self.assertFalse(chat["unread_result"])
+                group = restored.chat_list.topLevelItem(0)
+                item = next(group.child(i) for i in range(group.childCount())
+                            if group.child(i).data(0, Qt.ItemDataRole.UserRole) == background_id)
+                self.assertEqual(item.data(0, Qt.ItemDataRole.UserRole + 1), "idle")
+                self.assertFalse(item.font(0).bold())
+                restored._run().config = dict(restored.store.config)
+                restored._begin_task("Задача с ошибкой")
+                restored._new_chat()
+                restored._dispatch_run(restored._runs[background_id], restored._error, "network fixture failure")
+                self.assertTrue(chat["unread_result"])
+                group = restored.chat_list.topLevelItem(0)
+                item = next(group.child(i) for i in range(group.childCount())
+                            if group.child(i).data(0, Qt.ItemDataRole.UserRole) == background_id)
+                self.assertEqual(item.data(0, Qt.ItemDataRole.UserRole + 1), "failed")
+            finally:
+                restored.shutdown(); restored.close()
+
+    def test_parallel_chats_route_pending_prompts_streams_and_stop_independently(self):
+        from test_ai import FAKE
+        with tempfile.TemporaryDirectory() as root:
+            script = Path(root, "parallel.py")
+            script.write_text(FAKE.replace('"Привет\\u2028мир"', 'cmd["message"]').replace(
+                'cmd["message"] != "wait"', 'not cmd["message"].startswith("wait")'), encoding="utf-8")
+            tab = AITab(data_dir=str(Path(root, "data")), work_dir=root)
+            try:
+                tab.model.setEditText("alpha-model")
+                first = tab.current
+                with patch("app.ui.ai_tab.rpc_command", return_value=(sys.executable, [str(script)], script)):
+                    tab.input.setPlainText("wait alpha")
+                    tab._send()
+                    first_run = tab._selected_run
+                    tab._new_chat()
+                    second = tab.current
+                    tab.model.setEditText("beta-model")
+                    tab.input.setPlainText("wait beta")
+                    tab._send()
+                    second_run = tab._selected_run
+                wait_for(lambda: first_run.rpc.busy and second_run.rpc.busy
+                         and any(m.get("text") == "wait alpha" and m.get("role") == "assistant" for m in first["messages"])
+                         and any(m.get("text") == "wait beta" and m.get("role") == "assistant" for m in second["messages"]))
+                self.assertEqual(first["model"], "alpha-model")
+                self.assertEqual(second["model"], "beta-model")
+                self.assertTrue(tab.chat_list.isEnabled())
+                self.assertTrue(tab.new_btn.isEnabled())
+                tab._stop()
+                wait_for(lambda: not second_run.rpc.busy)
+                self.assertTrue(first_run.rpc.busy)
+                self.assertEqual(second["outcome"], "stopped")
+                tab._select_chat(tab.store.chats.index(first))
+                self.assertEqual(tab.model.currentText(), "alpha-model")
+                self.assertTrue(tab.stop_btn.isVisibleTo(tab))
+                self.assertNotIn("wait beta", tab.output.toPlainText())
+                tab._stop()
+                wait_for(lambda: not first_run.rpc.busy)
+                self.assertEqual(first["outcome"], "stopped")
+            finally:
+                tab.shutdown(); tab.close()
+
+    def test_composer_grows_with_wrapped_text_and_returns_to_one_line(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.resize(900, 700)
+                tab.show()
+                APP.processEvents()
+                compact = tab.input.height()
+                tab.input.setPlainText("line\n" * 3 + "line")
+                APP.processEvents()
+                self.assertGreater(tab.input.height(), compact * 2)
+                tab.input.setPlainText("line\n" * 40)
+                APP.processEvents()
+                maximum = tab.input.height()
+                self.assertLessEqual(maximum, compact * 6)
+                tab.input.setPlainText("wrapped words " * 35)
+                APP.processEvents()
+                self.assertGreater(tab.input.height(), compact)
+                self.assertLessEqual(tab.input.height(), maximum)
+                tab.input.clear()
+                APP.processEvents()
+                self.assertEqual(tab.input.height(), compact)
+                self.assertIs(tab.model.parentWidget(), tab.composer)
+            finally:
+                tab.shutdown(); tab.close()
+
+    def test_activity_bar_shows_current_action_and_cancels_in_the_transcript(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.show()
+                tab.current["running"] = True
+                tab._controls(True)
+                tab._event({"type": "tool_execution_start", "toolCallId": "read-test", "toolName": "read", "args": {"path": "report.txt"}})
+                self.assertFalse(tab.output.activity.isHidden())
+                self.assertIn("Читает файл: report.txt", tab.output.activity_label.text())
+                with patch.object(tab.rpc, "abort") as abort:
+                    tab.stop_btn.click()
+                    abort.assert_called_once()
+                self.assertIn("Останавливает", tab.output.activity_label.text())
+                self.assertFalse(tab.stop_btn.isEnabled())
+                tab._event({"type": "agent_end"})
+                self.assertTrue(tab.output.activity.isHidden())
+                self.assertEqual(tab.current["outcome"], "stopped")
+            finally:
+                tab.shutdown(); tab.close()
+
     def test_two_instruction_modes_are_saved_and_passed_to_next_task(self):
         with tempfile.TemporaryDirectory() as root:
             tab=AITab(data_dir=root,work_dir=root)
@@ -34,7 +276,7 @@ class AITabTests(unittest.TestCase):
                 tab.store.config['instructions_without_explanations']='Custom concise instruction'
                 tab.model.setEditText('test-model')
                 tab.input.setPlainText('task')
-                with patch('app.ui.ai_tab.runtime_command',return_value=('node',['cli'],Path(root,'index.js'))), patch.object(tab.rpc,'start') as start:
+                with patch('app.ui.ai_tab.rpc_command',return_value=('node',['cli'],Path(root,'index.js'))), patch.object(tab.rpc,'start') as start:
                     tab._send()
                     args=start.call_args.args[1]
                     self.assertEqual(args[args.index('--append-system-prompt')+1],'Custom concise instruction')
@@ -108,7 +350,7 @@ class AITabTests(unittest.TestCase):
     def test_incomplete_managed_runtime_offers_repair(self):
         with tempfile.TemporaryDirectory() as root:
             runtime = Path(root,'runtime'); runtime.mkdir()
-            with patch('app.core.ai_installer.runtime_folder',return_value=runtime), patch('app.ui.ai_tab.runtime_command',return_value=('node', ['cli'], runtime/'index.js')):
+            with patch('app.core.ai_installer.runtime_folder',return_value=runtime), patch('app.ui.ai_tab.rpc_command',return_value=('node', ['cli'], runtime/'index.js')):
                 tab=AITab(data_dir=str(Path(root,'data')),work_dir=root)
                 try:
                     self.assertFalse(tab.install_panel.isHidden())
@@ -186,7 +428,7 @@ class AITabTests(unittest.TestCase):
                 tab.thinking.setCurrentIndex(tab.thinking.findData("xhigh"))
                 tab.model.setEditText("fake-model")
                 tab.input.setPlainText("hello")
-                with patch("app.ui.ai_tab.runtime_command", return_value=("fake-node", ["cli.js"], Path("fake.js"))), patch.object(tab.rpc, "start") as start:
+                with patch("app.ui.ai_tab.rpc_command", return_value=("fake-node", ["cli.js"], Path("fake.js"))), patch.object(tab.rpc, "start") as start:
                     tab.send_btn.click()
                     args = start.call_args.args[1]
                     self.assertEqual(args[args.index("--thinking") + 1], "xhigh")
@@ -212,7 +454,7 @@ class AITabTests(unittest.TestCase):
                 self.assertEqual(tab.current["messages"], [])
                 self.assertEqual(tab.output.toPlainText(), "")
                 tab.output.welcome.connect_btn.click()
-                self.assertTrue(tab.connection_btn.isChecked())
+                self.assertTrue(tab.settings_dialog.isVisible())
                 tab.current["messages"].append({"role": "user", "text": "hello"})
                 tab._render()
                 self.assertTrue(tab.output.welcome.isHidden())
@@ -383,6 +625,10 @@ class AITabTests(unittest.TestCase):
                 tab._event({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "new answer"}})
                 tab._render()
                 wait_for(lambda: scroll.value() == scroll.maximum())
+                scroll.setValue(0)
+                tab.current["messages"].append({"id": "new-message", "role": "assistant", "text": "Новое сообщение"})
+                tab._render()
+                wait_for(lambda: scroll.value() == scroll.maximum())
             finally:
                 tab.shutdown()
                 tab.close()
@@ -477,7 +723,7 @@ class AITabTests(unittest.TestCase):
             tab.model.setEditText("fake")
             tab.input.setPlainText("hello")
             try:
-                with patch("app.ui.ai_tab.runtime_command", return_value=(sys.executable, [str(script)], script)):
+                with patch("app.ui.ai_tab.rpc_command", return_value=(sys.executable, [str(script)], script)):
                     tab.send_btn.click()
                 wait_for(lambda: not tab.rpc.busy and not tab._pending)
                 APP.processEvents()
@@ -494,7 +740,7 @@ class AITabTests(unittest.TestCase):
             script.write_text(FAKE, encoding="utf-8")
             tab = AITab(data_dir=str(Path(root, "data")), work_dir=root)
             tab.show()
-            self.assertIn(root, tab.folder_label.text())
+            self.assertIn(root, tab.folder_label.toolTip())
             self.assertFalse(tab.stop_btn.isEnabled())
             tab.rpc.start(sys.executable, [str(script)], root, {})
             wait_for(lambda: tab.rpc.ready)
@@ -515,7 +761,156 @@ class AITabTests(unittest.TestCase):
             restored.shutdown()
             restored.close()
 
-    def test_old_folder_history_does_not_enable_execution(self):
+    def test_settings_model_and_footer_stay_in_sync_and_save_without_request(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.connection_btn.click()
+                self.assertTrue(tab.settings_dialog.isVisible())
+                tab.settings_model.setEditText("model-from-settings")
+                self.assertEqual(tab.model.currentText(), "model-from-settings")
+                tab.model.setEditText("model-from-footer")
+                self.assertEqual(tab.settings_model.currentText(), "model-from-footer")
+                tab.settings_dialog.close()
+                self.assertEqual(tab.store.config["model"], "model-from-footer")
+                self.assertFalse(tab.rpc.ready)
+                tab._controls(True)
+                self.assertFalse(tab.settings_model.isEnabled())
+                self.assertFalse(tab.workspace_btn.isEnabled())
+            finally:
+                tab.shutdown(); tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertEqual(restored.settings_model.currentText(), "model-from-footer")
+            finally:
+                restored.shutdown(); restored.close()
+
+    def test_projects_group_chats_and_restore_selected_chat_and_folder(self):
+        with tempfile.TemporaryDirectory() as root:
+            first, second = Path(root, "first"), Path(root, "second")
+            first.mkdir(); second.mkdir()
+            data = str(Path(root, "data"))
+            tab = AITab(data_dir=data, work_dir=str(first))
+            try:
+                first_id = tab.current["id"]
+                with patch("app.ui.ai_tab.QFileDialog.getExistingDirectory", return_value=str(second)):
+                    tab.project_btn.click()
+                second_id = tab.current["id"]
+                tab._new_chat()
+                self.assertEqual(tab.chat_list.topLevelItemCount(), 2)
+                project = next(tab.chat_list.topLevelItem(i) for i in range(2)
+                               if tab.chat_list.topLevelItem(i).toolTip(0) == str(second))
+                self.assertEqual(project.text(0), "second (2)")
+                self.assertEqual(project.childCount(), 2)
+                first_index = next(i for i, chat in enumerate(tab.store.chats) if chat["id"] == first_id)
+                tab._select_chat(first_index)
+                self.assertEqual(tab.work_dir, str(first))
+                self.assertEqual(tab.output.folder, str(first))
+                self.assertTrue(tab.send_btn.isEnabled())
+                self.assertEqual(tab.workspace_path.text(), str(first))
+                tab._pending = "starting"
+                tab._open_project(str(second))
+                self.assertEqual(tab.current["id"], first_id)
+                tab._pending = None
+                self.assertNotEqual(first_id, second_id)
+            finally:
+                tab.shutdown(); tab.close()
+            restored = AITab(data_dir=data, work_dir=str(second))
+            try:
+                self.assertEqual(restored.current["id"], first_id)
+                self.assertEqual(restored.work_dir, str(first))
+                self.assertEqual(len(restored.store.chats), 3)
+                self.assertEqual(restored.chat_list.currentItem().data(0, Qt.ItemDataRole.UserRole), first_id)
+            finally:
+                restored.shutdown(); restored.close()
+
+    def test_real_pi_uses_project_folder_and_recovers_from_unavailable_model(self):
+        import json
+        import threading
+        from http.server import ThreadingHTTPServer
+        from test_ai_pi import LocalAPI
+        from app.core.ai import rpc_command
+        try:
+            rpc_command()
+        except ValueError as exc:
+            self.skipTest(str(exc))
+
+        class ProjectAPI(LocalAPI):
+            def do_GET(self):
+                payload = json.dumps({"data": [{"id": "test-model", "owned_by": "local"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_POST(self):
+                if self.server.reject_model:
+                    self.rfile.read(int(self.headers["Content-Length"]))
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":{"message":"model unavailable","type":"model_not_found"}}')
+                else:
+                    super().do_POST()
+
+        with tempfile.TemporaryDirectory() as root:
+            first, second = Path(root, "first"), Path(root, "second")
+            first.mkdir(); second.mkdir()
+            data = str(Path(root, "data"))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ProjectAPI)
+            server.requests = []
+            server.reject_model = True
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            tab = AITab(data_dir=data, work_dir=str(first))
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+                tab.endpoint.setText(f"http://127.0.0.1:{server.server_port}/v1")
+                tab.key.setText("local-project-test-key")
+                tab.model.setEditText("unavailable-model")
+                tab.input.setPlainText("Create the file")
+                tab.send_btn.click()
+                wait_for(lambda: tab.current.get("outcome") == "failed", 30)
+                self.assertIn("шестерёнку", tab.status.text())
+                self.assertIn("Загрузить модели", tab.status.text())
+                self.assertFalse(tab.error_settings_btn.isHidden())
+                tab.error_settings_btn.click()
+                self.assertTrue(tab.settings_dialog.isVisible())
+                tab.catalog_btn.click()
+                wait_for(lambda: tab.settings_model.findText("test-model") >= 0)
+                tab.settings_model.setCurrentIndex(tab.settings_model.findText("test-model"))
+                self.assertEqual(tab.model.currentText(), "test-model")
+                server.reject_model = False
+                tab._new_chat()
+                first_id = tab.current["id"]
+                tab.input.setPlainText("Create the file")
+                tab.send_btn.click()
+                wait_for(lambda: tab.current.get("outcome") == "completed", 30)
+                self.assertEqual((first / "agent-proof.txt").read_text(), "created by real Pi")
+                tab._open_project(str(second))
+                second_id = tab.current["id"]
+                tab.input.setPlainText("Create the file")
+                tab.send_btn.click()
+                wait_for(lambda: tab.current.get("outcome") == "completed", 30)
+                self.assertEqual((second / "agent-proof.txt").read_text(), "created by real Pi")
+                self.assertFalse(Path(data, "agent-proof.txt").exists())
+                self.assertNotEqual(first_id, second_id)
+                self.assertTrue(Path(tab.current["session"]).exists())
+                request_count = len(server.requests)
+            finally:
+                tab.shutdown(); tab.close()
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
+            restored = AITab(data_dir=data, work_dir=str(first))
+            try:
+                self.assertEqual(restored.current["id"], second_id)
+                self.assertEqual(restored.work_dir, str(second))
+                self.assertIn("Файл создан", restored.output.toPlainText())
+                self.assertFalse(restored.rpc.ready)
+                self.assertEqual(len(server.requests), request_count)
+            finally:
+                restored.shutdown(); restored.close()
+
+    def test_missing_project_folder_does_not_enable_execution(self):
         from app.core.ai import AIStore
         with tempfile.TemporaryDirectory() as root:
             data = str(Path(root, "data"))
@@ -523,7 +918,7 @@ class AITabTests(unittest.TestCase):
             store.new_chat(str(Path(root, "other")))
             tab = AITab(data_dir=data, work_dir=root)
             self.assertFalse(tab.send_btn.isEnabled())
-            self.assertIn("другой папк", tab.status.text())
+            self.assertIn("папка этого чата недоступна", tab.status.text())
             tab.shutdown()
             tab.close()
 

@@ -72,9 +72,32 @@ def finish():
     app.quit()
 
 
+def step4_new_message_scrolls_to_bottom():
+    key = "127.0.0.1:46212"
+    for index in range(35):
+        a.add_outgoing(key, f"Проверка прокрутки {index}\n" * 3)
+    panel = win.chat_panel
+    panel._refresh(force=True)
+    panel.history.doItemsLayout()
+    bar = panel.history.verticalScrollBar()
+    assert bar.maximum() > 0
+    bar.setValue(0)
+    msg = b.send("127.0.0.1:46211", "127.0.0.1", 46211, "Новое сообщение для прокрутки")
+    assert msg.status == "delivered"
+    panel._refresh()
+    QTimer.singleShot(100, verify_scroll)
+
+
+def verify_scroll():
+    bar = win.chat_panel.history.verticalScrollBar()
+    assert bar.value() == bar.maximum(), "новое сообщение осталось вне видимой области"
+    print("ui smoke: новое сообщение прокрутило чат вниз")
+
+
 QTimer.singleShot(300, step0_manual_peer)
 QTimer.singleShot(800, step1_send)
 QTimer.singleShot(1300, step2_open_chat)
 QTimer.singleShot(1800, step3_reply)
-QTimer.singleShot(2500, finish)
+QTimer.singleShot(2200, step4_new_message_scrolls_to_bottom)
+QTimer.singleShot(3000, finish)
 sys.exit(app.exec())

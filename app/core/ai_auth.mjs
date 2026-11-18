@@ -1,7 +1,11 @@
 // Pi owns OAuth credentials and refresh logic. This adapter exposes UI callbacks as JSONL.
 import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 
+const require = createRequire(process.argv[2]);
+const { EnvHttpProxyAgent, setGlobalDispatcher } = require("undici");
+setGlobalDispatcher(new EnvHttpProxyAgent({ bodyTimeout: 0, headersTimeout: 0 }));
 const { AuthStorage, ModelRegistry } = await import(pathToFileURL(process.argv[2]).href);
 const storage = AuthStorage.create(join(process.argv[3], "auth.json"));
 const write = (value) => process.stdout.write(JSON.stringify(value) + "\n");
@@ -22,8 +26,9 @@ async function handle(command) {
   } else if (command.type === "list") {
     storage.reload();
     const registry = ModelRegistry.create(storage);
+    const models = registry.getAll().filter(m => !command.provider || m.provider === command.provider);
     write({ type: "catalog", providers: storage.getOAuthProviders().map(p => ({ id: p.id, name: p.name })),
-      authenticated: storage.list(), models: registry.getAll().map(m => ({ id: m.id, name: m.name, provider: m.provider })) });
+      authenticated: storage.list(), models: models.map(m => ({ id: m.id, name: m.name, provider: m.provider })) });
   } else if (command.type === "login") {
     if (login) throw new Error("Вход уже выполняется");
     login = new AbortController();

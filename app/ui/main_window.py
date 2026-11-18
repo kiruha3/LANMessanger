@@ -458,6 +458,7 @@ class MainWindow(QMainWindow):
 
     def _quit(self):
         self._quitting = True
+        self.ai_tab.shutdown()
         QApplication.quit()
 
     def _exit_clicked(self):
@@ -942,6 +943,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self._quitting or not self.tray.isVisible():
+            self.ai_tab.shutdown()
             super().closeEvent(event)
             return
         event.ignore()

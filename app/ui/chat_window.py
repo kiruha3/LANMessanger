@@ -3,8 +3,8 @@ import subprocess
 import threading
 import time
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QTextDocument
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAbstractTextDocumentLayout, QColor, QImage, QKeySequence, QPainter, QTextCursor, QTextDocument
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -97,6 +97,126 @@ def _layout(msg, avail_w: int):
     return reply_doc, doc, content_w, content_h, reply_h
 
 
+class ChatHistory(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._selection_message = None
+        self._anchor = self._position = 0
+        self._dragging = False
+
+    def selection_for(self, msg):
+        if self._selection_message and self._selection_message[7] == msg[7]:
+            self._selection_message = msg
+            return min(self._anchor, self._position), max(self._anchor, self._position)
+        return None
+
+    def selected_text(self):
+        if not self._selection_message or self._anchor == self._position:
+            return ""
+        _, doc, *_ = _layout(self._selection_message, self.viewport().width())
+        cursor = QTextCursor(doc)
+        end = doc.characterCount() - 1
+        cursor.setPosition(min(self._anchor, end))
+        cursor.setPosition(min(self._position, end), QTextCursor.MoveMode.KeepAnchor)
+        return cursor.selectedText().replace("\u2029", "\n").replace("\u2028", "\n")
+
+    def clear_text_selection(self):
+        self._selection_message = None
+        self._anchor = self._position = 0
+        self._dragging = False
+        self.viewport().update()
+
+    def _text_position(self, item, pos, clamp=False):
+        msg = item.data(Qt.ItemDataRole.UserRole)
+        rect = self.visualItemRect(item)
+        _, doc, width, _, reply_h = _layout(msg, rect.width())
+        left = rect.right() - width - 8 if msg[0] == "out" else rect.left() + 8
+        point = QPointF(pos.x() - left - PAD_X, pos.y() - rect.top() - 2 - PAD_Y - reply_h)
+        if not clamp and not QRectF(0, 0, doc.textWidth(), doc.size().height()).contains(point):
+            return None
+        position = doc.documentLayout().hitTest(point, Qt.HitTestAccuracy.FuzzyHit)
+        if position < 0:
+            position = 0 if point.y() < 0 else doc.characterCount() - 1
+        position = max(0, min(position, doc.characterCount() - 1))
+        if not clamp and doc.characterAt(position) == "\ufffc":
+            return None
+        return doc, position
+
+    def _selection_item(self):
+        if self._selection_message:
+            for index in range(self.count()):
+                item = self.item(index)
+                msg = item.data(Qt.ItemDataRole.UserRole)
+                if msg and msg[0] != "sep" and msg[7] == self._selection_message[7]:
+                    return item
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.position().toPoint())
+            msg = item.data(Qt.ItemDataRole.UserRole) if item else None
+            self._selection_message = None
+            self._anchor = self._position = 0
+            self.viewport().update()
+            if msg and msg[0] != "sep" and msg[2]:
+                hit = self._text_position(item, event.position())
+                if hit is not None:
+                    self._selection_message = msg
+                    self._anchor = self._position = hit[1]
+                    self._dragging = True
+                    self.setFocus(Qt.FocusReason.MouseFocusReason)
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            item = self._selection_item()
+            if item:
+                self._position = self._text_position(item, event.position(), clamp=True)[1]
+                self.viewport().update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        msg = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if event.button() == Qt.MouseButton.LeftButton and msg and msg[0] != "sep" and msg[2]:
+            hit = self._text_position(item, event.position())
+            if hit is not None:
+                doc, position = hit
+                cursor = QTextCursor(doc)
+                cursor.setPosition(position)
+                cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+                self._selection_message = msg
+                self._anchor, self._position = cursor.selectionStart(), cursor.selectionEnd()
+                self._dragging = False
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                self.viewport().update()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy) and self.selected_text():
+            QApplication.clipboard().setText(self.selected_text())
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            self._selection_message = None
+            self._dragging = False
+            self.viewport().update()
+        super().keyPressEvent(event)
+
+
 class BubbleDelegate(QStyledItemDelegate):
     """Рисует сообщение как пузырь Telegram: свои справа, чужие слева."""
 
@@ -144,7 +264,19 @@ class BubbleDelegate(QStyledItemDelegate):
             painter.restore()
         painter.translate(bubble.left() + PAD_X,
                           bubble.top() + PAD_Y + reply_h)
-        doc.drawContents(painter)
+        selection = self.parent().selection_for(msg)
+        if selection and selection[0] != selection[1]:
+            context = QAbstractTextDocumentLayout.PaintContext()
+            selected = QAbstractTextDocumentLayout.Selection()
+            selected.cursor = QTextCursor(doc)
+            selected.cursor.setPosition(min(selection[0], doc.characterCount() - 1))
+            selected.cursor.setPosition(min(selection[1], doc.characterCount() - 1), QTextCursor.MoveMode.KeepAnchor)
+            selected.format.setBackground(QColor(colors["accent"]))
+            selected.format.setForeground(QColor("#ffffff"))
+            context.selections = [selected]
+            doc.documentLayout().draw(painter, context)
+        else:
+            doc.drawContents(painter)
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:
@@ -186,10 +318,10 @@ class ChatPanel(QWidget):
         header_row.addWidget(self.invite_btn)
         header_row.addWidget(self.rdp_btn)
 
-        self.history = QListWidget()
+        self.history = ChatHistory()
         self.history.setItemDelegate(BubbleDelegate(self.history))
         self.history.setSelectionMode(QListWidget.SelectionMode.NoSelection)
-        self.history.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.history.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.history.setSpacing(2)
         self.history.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.history.setHorizontalScrollBarPolicy(
@@ -255,11 +387,16 @@ class ChatPanel(QWidget):
         if not msg or msg[0] == "sep":
             return
         menu = QMenu(self)
-        copy_act = menu.addAction("Копировать")
+        selection = self.history.selection_for(msg)
+        selected = self.history.selected_text() if selection else ""
+        copy_act = menu.addAction("Копировать выделенное" if selected else "Копировать")
         reply_act = menu.addAction("Ответить")
         act = menu.exec(self.history.viewport().mapToGlobal(pos))
         if act is copy_act:
-            self._copy_message(msg)
+            if selected:
+                QApplication.clipboard().setText(selected)
+            else:
+                self._copy_message(msg)
         elif act is reply_act:
             self._set_reply(msg)
 
@@ -298,6 +435,8 @@ class ChatPanel(QWidget):
             self.viewer.dock()
 
     def set_key(self, key: str | None):
+        if key != self.key:
+            self.history.clear_text_selection()
         self.key = key
         self._rendered = None
         self._clear_reply()
@@ -307,6 +446,7 @@ class ChatPanel(QWidget):
         self._refresh(force=True)
 
     def show_hint(self, text: str):
+        self.history.clear_text_selection()
         self.key = None
         self._clear_reply()
         self.header.setText(text)
@@ -517,13 +657,15 @@ class ChatPanel(QWidget):
         msgs = self.engine.chat(self.key)
         signature = (len(msgs), tuple(m.status for m in msgs))
         if force or signature != self._rendered:
+            new_messages = self._rendered is None or len(msgs) > self._rendered[0]
             bar = self.history.verticalScrollBar()
             at_bottom = bar.value() >= bar.maximum() - 20
             prev_value = bar.value()
             self._rendered = signature
             self._rebuild(msgs)
-            if force or at_bottom:
+            if force or new_messages or at_bottom:
                 bar.setValue(bar.maximum())
+                QTimer.singleShot(0, self.history.scrollToBottom)
             else:
                 bar.setValue(prev_value)  # не дёргаем скролл при чтении выше
         if self.window().isActiveWindow():
@@ -554,6 +696,8 @@ class ChatPanel(QWidget):
                          (m.direction, m.author, m.text, m.timestamp,
                           m.status, m.img, reply, m.id))
             self.history.addItem(item)
+        if self.history._selection_item() is None:
+            self.history.clear_text_selection()
 
 
 def _day_label(ts: float) -> str:

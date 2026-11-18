@@ -10,7 +10,7 @@ try {
     $env:PATH = @((Split-Path $taskPython -Parent), "$env:SystemRoot\System32", $env:SystemRoot) -join ';'
     & $taskPython scripts/generate_icon.py
     if ($LASTEXITCODE -ne 0) { throw 'Icon generation failed' }
-    & $taskPython -m PyInstaller --clean --noconfirm --onefile --windowed --name LANMessenger --icon 'build/LANMessenger.ico' --collect-data certifi --add-data 'app/core/ai_auth.mjs;app/core' --add-data 'app/data/ai_catalog.json;app/data' --add-data 'licenses;licenses' --add-data 'THIRD_PARTY_NOTICES.md;.' main.py
+    & $taskPython -m PyInstaller --clean --noconfirm --onefile --windowed --name LANMessenger --icon 'build/LANMessenger.ico' --collect-data certifi --add-data 'app/core/ai_auth.mjs;app/core' --add-data 'app/core/ai_rpc.mjs;app/core' --add-data 'app/data/ai_catalog.json;app/data' --add-data 'licenses;licenses' --add-data 'THIRD_PARTY_NOTICES.md;.' main.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed: $LASTEXITCODE" }
     New-Item -ItemType Directory -Path (Join-Path $taskRepo 'dist/licenses') -Force | Out-Null
     foreach ($taskLicense in @('bb-MIT.txt', 'certifi-LICENSE.txt', 'truststore-MIT.txt')) {

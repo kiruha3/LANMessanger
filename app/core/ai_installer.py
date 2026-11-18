@@ -17,7 +17,7 @@ import urllib.request
 import uuid
 import zipfile
 
-from PyQt6.QtCore import QLockFile, QThread, pyqtSignal
+from PyQt6.QtCore import QLockFile, QObject, pyqtSignal
 from .https import open_url, network_error_message
 
 PI_VERSION = '0.73.1'
@@ -70,12 +70,15 @@ def download(url: str, target: Path, sha256: str, progress, cancel):
     check_cancel(cancel)
     digest = hashlib.sha256()
     request = urllib.request.Request(url, headers={'User-Agent': 'LANMessenger-runtime-installer'})
-    with open_url(request, timeout=10) as response, target.open('wb') as output:
+    deadline = time.monotonic() + 300
+    with open_url(request, timeout=5) as response, target.open('wb') as output:
         total = int(response.headers.get('Content-Length', 0))
         size = 0
         while True:
             check_cancel(cancel)
-            chunk = response.read(256 * 1024)
+            if time.monotonic() > deadline:
+                raise ValueError('Время загрузки истекло. Повторите установку.')
+            chunk = getattr(response, 'read1', response.read)(256 * 1024)
             if not chunk:
                 break
             output.write(chunk)
@@ -270,7 +273,7 @@ def install_runtime(progress, cancel, target: Path | None = None):
         lock.unlock()
 
 
-class RuntimeInstaller(QThread):
+class RuntimeInstaller(QObject):
     progress = pyqtSignal(str, int)
     succeeded = pyqtSignal()
     failed = pyqtSignal(str)
@@ -278,14 +281,34 @@ class RuntimeInstaller(QThread):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cancel_event = threading.Event()
+        self.thread = None
+
+    def start(self):
+        if not self.isRunning():
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
+
+    def isRunning(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def wait(self, milliseconds=None):
+        if self.thread:
+            self.thread.join(None if milliseconds is None else milliseconds / 1000)
+        return not self.isRunning()
+
+    def _notify(self, signal, *args):
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
 
     def cancel(self):
         self.cancel_event.set()
 
     def run(self):
         try:
-            install_runtime(self.progress.emit, self.cancel_event)
+            install_runtime(lambda *args: self._notify(self.progress, *args), self.cancel_event)
         except Exception as exc:
-            self.failed.emit(network_error_message(exc))
+            self._notify(self.failed, network_error_message(exc))
         else:
-            self.succeeded.emit()
+            self._notify(self.succeeded)

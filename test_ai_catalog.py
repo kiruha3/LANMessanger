@@ -34,6 +34,14 @@ class ModelCatalogTests(unittest.TestCase):
                     self.send_header("Location", "/v1/models")
                 self.end_headers()
                 try:
+                    if self.path == "/horde/models?type=image":
+                        self.wfile.write(json.dumps([
+                            {"name": "Dreamshaper", "count": 3}, {"name": "Offline", "count": 0}]).encode())
+                        return
+                    if self.path == "/v1/images/models":
+                        self.wfile.write(json.dumps({"data": [{"id": "locked", "available": False,
+                            "unavailableReason": "FIRST_TOP_UP_REQUIRED"}, {"id": "ready", "available": True}]}).encode())
+                        return
                     if self.path.startswith("/nested/"):
                         self.wfile.write(b'{"data":' + b'[' * 1100 + b']' * 1100 + b'}')
                         return
@@ -116,6 +124,17 @@ class ModelCatalogTests(unittest.TestCase):
             self.wait_for(lambda: not self.catalog.busy)
         self.assertEqual(len(self.errors), 2)
         self.assertFalse(self.models)
+
+    def test_image_catalog_keeps_access_reason_and_horde_uses_active_workers(self):
+        self.catalog.fetch(self.base + "/v1", "synthetic-key", catalog_type="images")
+        self.wait_for(lambda: self.models or self.errors)
+        self.assertFalse(self.errors)
+        self.assertEqual(self.models[0][0]["unavailable_reason"], "FIRST_TOP_UP_REQUIRED")
+        self.assertFalse(self.models[0][0]["available"])
+        self.catalog.fetch(self.base + "/horde", "", catalog_type="horde")
+        self.wait_for(lambda: len(self.models) == 2 or self.errors)
+        self.assertEqual([m["id"] for m in self.models[1]], ["Dreamshaper"])
+        self.assertIsNone(self.requests[-1][1])
 
     def test_deeply_nested_json_reports_error_without_escaping_qt_callback(self):
         uncaught = []

@@ -17,6 +17,44 @@ from app.core.ai import runtime_command, prepare_environment
 
 
 class InstallerTests(unittest.TestCase):
+    def test_slow_continuous_download_can_be_cancelled(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        finished = threading.Event()
+
+        class SlowHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    while not finished.wait(.03):
+                        self.wfile.write(b'x'); self.wfile.flush()
+                except OSError:
+                    pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), SlowHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        cancel = threading.Event()
+        timer = threading.Timer(.2, cancel.set); timer.start()
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                started = time.monotonic()
+                with self.assertRaises(installer.InstallCancelled):
+                    installer.download(f'http://127.0.0.1:{server.server_port}', Path(root, 'download'), '', lambda *_: None, cancel)
+                self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            finished.set(); timer.cancel(); server.shutdown(); server.server_close(); thread.join(2)
+
+    def test_installer_wait_is_bounded_and_worker_can_finish_after_cancellation(self):
+        with patch.object(installer, 'install_runtime', side_effect=lambda _progress, cancel: cancel.wait(5)):
+            worker = installer.RuntimeInstaller()
+            worker.start()
+            self.assertFalse(worker.wait(20))
+            worker.cancel()
+            self.assertTrue(worker.wait(500))
+
     def test_download_checks_hash(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder, 'source'); source.write_bytes(b'payload')

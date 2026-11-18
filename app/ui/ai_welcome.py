@@ -29,6 +29,7 @@ def _price(value):
 
 class AIWelcome(QWidget):
     connect_requested = pyqtSignal()
+    free_image_requested = pyqtSignal()
     expansion_changed = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -38,14 +39,18 @@ class AIWelcome(QWidget):
         layout.setSpacing(10)
         layout.addWidget(_label("Подключите модель и начните чат", True))
         layout.addWidget(_label(
-            "1. Откройте «Подключение модели» и выберите «Совместимый API».\n"
+            "1. Нажмите шестерёнку рядом с моделью и выберите «Совместимый API».\n"
             "2. Укажите URL API (например, https://server/v1) и введите свой ключ.\n"
             "3. Нажмите «Загрузить модели» и выберите доступную модель. Если список недоступен, введите точный ID вручную.\n"
-            "4. Напишите задачу в поле внизу. Агент будет работать в папке приложения."))
+            "4. Выберите рабочую папку через «Добавить папку…» и напишите задачу в поле внизу."))
         self.connect_btn = QPushButton("Настроить подключение")
         self.connect_btn.clicked.connect(self.connect_requested)
         layout.addWidget(self.connect_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.free_image_btn = QPushButton("Нарисовать бесплатно — AI Horde")
+        self.free_image_btn.clicked.connect(self.free_image_requested)
+        layout.addWidget(self.free_image_btn, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(_label("Для встроенных провайдеров можно выбрать API-ключ или поддерживаемый вход по аккаунту."))
+        layout.addWidget(_label("Бесплатные картинки AI Horde уже настроены: нажмите «Нарисовать бесплатно» и опишите картинку. Ключ и регистрация не нужны; есть очередь. Cloudflare предлагает дневную квоту с собственным аккаунтом и токеном. Для Provod и других Images API выберите «Совместимый API — картинки»."))
         catalog = load_catalog()
         layout.addWidget(_label("Справочник моделей по разделам", True))
         layout.addWidget(_label(

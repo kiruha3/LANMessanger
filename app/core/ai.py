@@ -8,9 +8,12 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
+
+from .ai_images import HORDE_MODEL, HORDE_URL
 
 
 PI_VERSION = "0.73.1"
@@ -27,7 +30,31 @@ PROVIDERS = {
     "google": ("Google — API", "GEMINI_API_KEY"),
     "github-copilot": ("GitHub Copilot — аккаунт", ""),
     "lanmessenger-api": ("Совместимый API", "LANMESSENGER_AI_KEY"),
+    "lanmessenger-images": ("Совместимый API — картинки", "LANMESSENGER_AI_KEY"),
+    "ai-horde": ("AI Horde — бесплатные картинки", "AI_HORDE_API_KEY"),
+    "cloudflare-images": ("Cloudflare — картинки, бесплатная квота", "CLOUDFLARE_API_TOKEN"),
 }
+AUTH_ENVIRONMENT = {
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "GEMINI_API_KEY",
+    "GOOGLE_API_KEY", "LANMESSENGER_AI_KEY", "GITHUB_TOKEN", "GH_TOKEN",
+    "COPILOT_GITHUB_TOKEN", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "NODE_OPTIONS", "AI_HORDE_API_KEY", "CLOUDFLARE_API_TOKEN",
+    "LANMESSENGER_MODEL_CONFIG", "LANMESSENGER_IMAGE_ACCOUNTS", "LANMESSENGER_SHELL",
+}
+
+
+def default_config():
+    return {"provider": "openai-codex", "model": "", "endpoint": "", "runtime": "", "thinking": "auto",
+            "response_style": "with_explanations", "image_account": "", "image_model": "",
+            **{"instructions_" + key: prompt for key, (_label, prompt) in RESPONSE_STYLES.items()}}
+
+
+def process_environment(overrides):
+    environment = QProcessEnvironment.systemEnvironment()
+    for name in AUTH_ENVIRONMENT:
+        environment.remove(name)
+    for name, value in overrides.items():
+        environment.insert(name, value)
+    return environment
 
 
 def application_folder() -> str:
@@ -69,25 +96,98 @@ class AIStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "state.json"
-        self.config = {"provider": "openai-codex", "model": "", "endpoint": "", "runtime": "", "thinking": "auto",
-                       "response_style": "with_explanations",
-                       **{'instructions_' + key: prompt for key, (_label, prompt) in RESPONSE_STYLES.items()}}
+        self.config = default_config()
         self.chats = []
+        self.profiles = []
+        self.active_profile = "default"
+        self.active_chat = ""
         if self.path.exists():
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 self.config.update({k: str(v) for k, v in data["config"].items() if k in self.config})
                 self.chats = data["chats"]
+                self.active_chat = data.get("active_chat", "")
+                if not isinstance(self.active_chat, str):
+                    raise ValueError("Invalid active chat")
                 if not isinstance(self.chats, list):
                     raise ValueError("Invalid chat list")
                 for chat in self.chats:
-                    if not isinstance(chat.get("messages"), list) or not chat.get("id"):
+                    if (not isinstance(chat.get("messages"), list)
+                            or not all(isinstance(chat.get(field), str) and chat[field] for field in ("id", "title", "folder", "session"))
+                            or not isinstance(chat.get("archived_messages", []), list)):
                         raise ValueError("Invalid chat")
                     if chat.get("running"):
                         chat["interrupted"] = True
                         chat["running"] = False
-            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                self.profiles = data.get("profiles", [])
+                self.active_profile = data.get("active_profile", "default")
+                if not isinstance(self.profiles, list):
+                    raise ValueError("Invalid profile list")
+                seen = set()
+                for profile in self.profiles:
+                    profile_id = profile["id"]
+                    if (profile_id != "default" and str(uuid.UUID(profile_id)) != profile_id) or profile_id in seen:
+                        raise ValueError("Invalid profile identity")
+                    if not isinstance(profile["name"], str) or not profile["name"].strip() or not isinstance(profile["config"], dict):
+                        raise ValueError("Invalid profile")
+                    profile["config"] = {**default_config(), **{k: str(v) for k, v in profile["config"].items() if k in self.config}}
+                    for field, required in (("models", ("id", "provider")), ("api_models", ("id",))):
+                        models = profile.get(field, [])
+                        if (not isinstance(models, list) or any(not isinstance(m, dict)
+                                or not all(isinstance(m.get(k), str) and m[k] for k in required)
+                                or not isinstance(m.get("owner", ""), str) for m in models)):
+                            raise ValueError("Invalid model catalog")
+                    seen.add(profile_id)
+                if self.profiles:
+                    selected = next(p for p in self.profiles if p["id"] == self.active_profile)
+                    self.config.update({k: str(v) for k, v in selected["config"].items() if k in self.config})
+            except (ValueError, KeyError, TypeError, AttributeError, StopIteration) as exc:
                 raise ValueError(f"Не удалось прочитать историю ИИ: {self.path}. Файл сохранён без изменений.") from exc
+        if not self.profiles:
+            self.profiles = [{"id": "default", "name": "Основной", "config": dict(self.config)}]
+            self.active_profile = "default"
+        self.ensure_horde_profile()
+
+    def ensure_horde_profile(self):
+        profile = next((p for p in self.profiles if p["config"]["provider"] == "ai-horde"), None)
+        if profile is None:
+            profile_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://aihorde.net/lanmessenger/default-images"))
+            if any(p["id"] == profile_id for p in self.profiles):
+                profile_id = str(uuid.uuid4())
+            profile = {"id": profile_id, "name": "Картинки бесплатно — AI Horde",
+                       "config": {**default_config(), "provider": "ai-horde", "model": HORDE_MODEL, "endpoint": HORDE_URL},
+                       "api_models": [{"id": HORDE_MODEL, "owner": "AI Horde"}]}
+            self.profiles.append(profile)
+        for name, fallback in (("model", HORDE_MODEL), ("endpoint", HORDE_URL)):
+            if not profile["config"].get(name, "").strip():
+                profile["config"][name] = fallback
+                if profile["id"] == self.active_profile:
+                    self.config[name] = fallback
+        return profile
+
+    def profile_root(self):
+        root = self.root if self.active_profile == "default" else self.root / "profiles" / self.active_profile
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def select_profile(self, profile_id):
+        selected = next(p for p in self.profiles if p["id"] == profile_id)
+        self.save()
+        self.active_profile = profile_id
+        self.config = {**default_config(), **selected["config"]}
+        self.save()
+
+    def add_profile(self, name):
+        name = name.strip()
+        if not name or len(name) > 80:
+            raise ValueError("Название аккаунта должно содержать от 1 до 80 символов")
+        self.save()
+        config = default_config()
+        for key in ("provider", "runtime"):
+            config[key] = self.config[key]
+        profile = {"id": str(uuid.uuid4()), "name": name, "config": config}
+        self.profiles.append(profile)
+        return profile
 
     def new_chat(self, folder: str) -> dict:
         chat_id = str(uuid.uuid4())
@@ -95,14 +195,20 @@ class AIStore:
         sessions.mkdir(exist_ok=True)
         chat = {"id": chat_id, "folder": str(Path(folder).resolve()), "title": "Новый чат",
                 "session": str(sessions / f"{chat_id}.jsonl"), "messages": [],
-                "running": False, "interrupted": False}
+                "ai_selection": {"profile_id": self.active_profile, "model": self.config["model"]},
+                "running": False, "interrupted": False, "last_activity": time.time()}
         self.chats.insert(0, chat)
+        self.active_chat = chat_id
         self.save()
         return chat
 
     def save(self):
+        for profile in self.profiles:
+            if profile["id"] == self.active_profile:
+                profile["config"] = dict(self.config)
         temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"config": self.config, "chats": self.chats}, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.write_text(json.dumps({"config": self.config, "chats": self.chats, "profiles": self.profiles,
+                                         "active_profile": self.active_profile, "active_chat": self.active_chat}, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, self.path)
 
 
@@ -173,6 +279,11 @@ def runtime_command(configured: str = "") -> tuple[str, list[str], Path]:
     raise ValueError("Не найден Pi. Нажмите «Установить компоненты ИИ» или укажите папку установленного Pi в подключении.")
 
 
+def rpc_command(configured=""):
+    program, _args, module = runtime_command(configured)
+    return program, [str(Path(__file__).with_name("ai_rpc.mjs")), str(module)], module
+
+
 def prepare_environment(root: Path, config: dict, key: str) -> dict:
     from .ai_installer import managed_shell, runtime_environment
     agent = root / "pi"
@@ -197,6 +308,8 @@ def prepare_environment(root: Path, config: dict, key: str) -> dict:
         if config["provider"] in stored:
             raise ValueError("Для использования API-ключа сначала нажмите «Выйти из аккаунта» у этого провайдера: сохранённый аккаунт Pi имеет приоритет.")
     env = {"PI_CODING_AGENT_DIR": str(agent), **runtime_environment()}
+    if sys.platform == "win32" and shell.is_file():
+        env["LANMESSENGER_SHELL"] = str(shell)
     variable = PROVIDERS.get(config["provider"], ("", ""))[1]
     if key and variable:
         env[variable] = key
@@ -212,13 +325,16 @@ def prepare_environment(root: Path, config: dict, key: str) -> dict:
         thinking = config.get("thinking", "auto")
         if thinking not in THINKING_LEVELS:
             raise ValueError("Неизвестный уровень размышлений")
-        model_definition = {"id": model, "contextWindow": 128000, "maxTokens": 16384}
+        model_definition = {"id": model, "name": model, "input": ["text", "image"],
+                            "reasoning": False, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                            "contextWindow": 128000, "maxTokens": 16384}
         if thinking != "auto":
             model_definition.update(reasoning=True, thinkingLevelMap={"off": "none", "xhigh": "xhigh"})
         models = {"providers": {"lanmessenger-api": {"baseUrl": endpoint, "api": "openai-completions",
                   "apiKey": "LANMESSENGER_AI_KEY", "authHeader": True,
                   "models": [model_definition]}}}
         (agent / "models.json").write_text(json.dumps(models), encoding="utf-8")
+        env["LANMESSENGER_MODEL_CONFIG"] = json.dumps(models["providers"]["lanmessenger-api"])
     return env
 
 
@@ -253,9 +369,7 @@ class PiProcess(QObject):
         self._stderr = ""
         self._stopping = False
         self._secrets = [v for k, v in env.items() if "KEY" in k and v]
-        environment = QProcessEnvironment.systemEnvironment()
-        for name, value in env.items():
-            environment.insert(name, value)
+        environment = process_environment(env)
         self.process.setProcessEnvironment(environment)
         self.process.setWorkingDirectory(cwd)
         self.process.start(program, args)
@@ -272,12 +386,12 @@ class PiProcess(QObject):
             self._deadline.start(15000)
         self.process.write((json.dumps(value, ensure_ascii=False) + "\n").encode("utf-8"))
 
-    def send_prompt(self, text: str):
+    def send_prompt(self, text: str, images=None):
         if not self.ready or self.busy:
             raise RuntimeError("Дождитесь готовности или остановки агента")
         self._set_busy(True)
         self._stopping = False
-        self.command({"id": str(uuid.uuid4()), "type": "prompt", "message": text})
+        self.command({"id": str(uuid.uuid4()), "type": "prompt", "message": text, **({"images": images} if images else {})})
         self._deadline.start(45000)
 
     def abort(self):

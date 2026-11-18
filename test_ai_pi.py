@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -11,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import QCoreApplication
-from app.core.ai import PiProcess, prepare_environment, runtime_command
+from app.core.ai import PiProcess, prepare_environment, process_environment, rpc_command
 
 APP = QCoreApplication.instance() or QCoreApplication([])
 
@@ -36,9 +37,13 @@ class LocalAPI(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
-        if not any(m.get("role") == "tool" for m in request["messages"]):
-            delta = {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_write", "type": "function",
-                     "function": {"name": getattr(self.server, 'tool_name', 'write'), "arguments": json.dumps(getattr(self.server, 'tool_arguments', {"path": "agent-proof.txt", "content": "created by real Pi"}))}}]}
+        planned_calls = self.server.tool_plan(request, len(self.server.requests)) if hasattr(self.server, "tool_plan") else None
+        if planned_calls is not None:
+            delta = {"role": "assistant", "tool_calls": planned_calls}
+            reason = "tool_calls"
+        elif not hasattr(self.server, "tool_plan") and (not any(m.get("role") == "tool" for m in request["messages"]) or len(self.server.requests) in getattr(self.server, "force_tool_requests", ())):
+            delta = {"role": "assistant", "tool_calls": getattr(self.server, "tool_calls", [{"index": 0, "id": "call_write", "type": "function",
+                     "function": {"name": getattr(self.server, 'tool_name', 'write'), "arguments": json.dumps(getattr(self.server, 'tool_arguments', {"path": "agent-proof.txt", "content": "created by real Pi"}))}}])}
             reason = "tool_calls"
         else:
             delta = {"role": "assistant", "content": "Файл создан локальным агентом."}
@@ -51,12 +56,39 @@ class LocalAPI(BaseHTTPRequestHandler):
 
 
 class RealPiTests(unittest.TestCase):
-    def test_real_pi_bash_runs_with_prepared_environment(self):
+    def test_rpc_preserves_environment_proxy_support(self):
         try:
-            program, cli, _module = runtime_command()
+            program, cli, _module = rpc_command()
         except ValueError as exc:
             self.skipTest(str(exc))
         with tempfile.TemporaryDirectory() as root:
+            script = '''
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+try { await import(pathToFileURL(process.argv[1]).href); }
+catch(error) { if (!error.message.includes("Модель не найдена")) throw error; }
+const { getGlobalDispatcher } = createRequire(process.argv[2])("undici");
+console.log(getGlobalDispatcher().constructor.name);
+'''
+            environment = process_environment({"PI_CODING_AGENT_DIR": root, "HTTPS_PROXY": "http://127.0.0.1:1"})
+            env = dict(entry.split("=", 1) for entry in environment.toStringList())
+            result = subprocess.run([program, "--input-type=module", "-e", script, *cli,
+                                     "--session", str(Path(root, "proxy-session.jsonl")),
+                                     "--provider", "unknown", "--model", "unknown"], cwd=root,
+                                    env=env, capture_output=True, text=True, encoding="utf-8", timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "EnvHttpProxyAgent")
+
+    def test_real_pi_bash_runs_with_prepared_environment(self):
+        try:
+            program, cli, _module = rpc_command()
+        except ValueError as exc:
+            self.skipTest(str(exc))
+        with tempfile.TemporaryDirectory() as root:
+            project_settings = Path(root, '.pi'); project_settings.mkdir()
+            (project_settings / 'settings.json').write_text(json.dumps({'packages': ['npm:lanmessenger-review-nonexistent-sentinel']}))
+            guard = Path(root, 'package-guard.mjs')
+            guard.write_text('const {DefaultPackageManager}=await import(' + json.dumps((_module.parent / 'core/package-manager.js').as_uri()) + ');DefaultPackageManager.prototype.installParsedSource=async()=>{throw new Error("Project package installation attempted");};')
             server = ThreadingHTTPServer(('127.0.0.1', 0), LocalAPI)
             server.requests = []
             server.tool_name = 'bash'
@@ -67,7 +99,7 @@ class RealPiTests(unittest.TestCase):
             config = {'provider':'lanmessenger-api', 'model':'test-model', 'endpoint':f'http://127.0.0.1:{server.server_port}/v1'}
             env = prepare_environment(Path(root), config, 'local-test-key')
             try:
-                rpc.start(program, cli + ['--mode','rpc','--provider','lanmessenger-api','--model','test-model','--session',str(Path(root,'bash-session.jsonl')),'--no-extensions','--no-skills'], root, env)
+                rpc.start(program, ['--import', guard.as_uri()] + cli + ['--mode','rpc','--provider','lanmessenger-api','--model','test-model','--session',str(Path(root,'bash-session.jsonl')),'--no-extensions','--no-skills'], root, env)
                 wait_for(lambda: rpc.ready or errors)
                 self.assertEqual(errors, [])
                 rpc.send_prompt('Check the shell')
@@ -81,7 +113,7 @@ class RealPiTests(unittest.TestCase):
 
     def test_real_pi_writes_file_and_restores_session_without_replay(self):
         try:
-            program, cli, _module = runtime_command()
+            program, cli, _module = rpc_command()
         except ValueError as exc:
             self.skipTest(str(exc))
         with tempfile.TemporaryDirectory() as root:

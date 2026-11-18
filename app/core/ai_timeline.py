@@ -115,7 +115,7 @@ class Timeline:
             if message.get("status") in ("running", "queued"):
                 # agent_end may follow a provider failure with unexecuted partial tool calls.
                 # Only tool_execution_end is evidence that a tool actually completed.
-                message["status"] = "interrupted" if message.get("role") == "tool" and status == "completed" else status
+                message["status"] = "interrupted" if message.get("role") == "tool" and status in ("completed", "failed") else status
         self._blocks = {}
 
 

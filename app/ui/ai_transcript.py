@@ -4,11 +4,14 @@ Adapted presentation: Copyright (c) 2026 Michael Yong, MIT (licenses/bb-MIT.txt)
 """
 import json
 import math
+import shutil
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QTextCharFormat, QTextCursor, QTextDocument
-from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QSizePolicy, QTextBrowser, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtGui import QColor, QDesktopServices, QPixmap, QTextCharFormat, QTextCursor, QTextDocument
+from PyQt6.QtWidgets import QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QTextBrowser, QToolButton, QVBoxLayout, QWidget
+
+from ..core.ai_images import image_bytes
 
 from . import theme
 from .ai_welcome import AIWelcome
@@ -92,14 +95,69 @@ class MessageBody(QTextBrowser):
         event.ignore()
 
 
+class GeneratedImage(QWidget):
+    def __init__(self, path, image_root, parent=None):
+        super().__init__(parent)
+        self.path = None
+        self.pixmap = QPixmap()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        self.preview = QLabel()
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.preview)
+        try:
+            candidate = Path(path).resolve()
+            if image_root is None or not candidate.is_relative_to(Path(image_root).resolve()) or candidate.stat().st_size > 24 * 1024 * 1024:
+                raise ValueError("Недопустимый путь изображения")
+            data = candidate.read_bytes()
+            image_bytes(data)
+            self.pixmap.loadFromData(data)
+            self.path = candidate
+        except (OSError, ValueError, TypeError):
+            self.preview.setText("Изображение недоступно. Возможно, файл был перемещён или удалён.")
+            self.preview.setWordWrap(True)
+            return
+        actions = QHBoxLayout()
+        open_btn = QPushButton("Открыть")
+        open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.path))))
+        save_btn = QPushButton("Сохранить как…")
+        save_btn.clicked.connect(self._save_as)
+        copy_btn = QPushButton("Копировать картинку")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setPixmap(self.pixmap))
+        for button in (open_btn, save_btn, copy_btn):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.pixmap.isNull():
+            scaled = self.pixmap.scaled(max(40, min(640, self.width())), 420,
+                                        Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.preview.setPixmap(scaled)
+            self.preview.setFixedHeight(scaled.height())
+
+    def _save_as(self):
+        path, _filter = QFileDialog.getSaveFileName(self, "Сохранить картинку", str(self.path), "Изображения (*.png *.jpg *.webp)")
+        if path and Path(path).resolve() != self.path:
+            try:
+                shutil.copyfile(self.path, path)
+            except OSError as exc:
+                self.preview.setToolTip(f"Не удалось сохранить: {exc}")
+
+
 class TranscriptRow(QFrame):
     expansion_changed = pyqtSignal()
 
-    def __init__(self, message, folder, parent=None):
+    def __init__(self, message, folder, parent=None, image_root=None):
         super().__init__(parent)
         self.role = message.get("role", "system")
         self._snapshot = None
         self._manual_expansion = None
+        self._image_root = image_root
+        self._image_paths = []
+        self._image_widgets = []
         self.expandable = self.role in ("tool", "thinking")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
@@ -161,6 +219,18 @@ class TranscriptRow(QFrame):
             self.header.blockSignals(False)
             self.body.setVisible(expanded)
         self.body.set_content(text, markdown=self.role == "assistant")
+        paths = message.get("images", []) if self.role in ("assistant", "user") else []
+        if not isinstance(paths, list):
+            paths = []
+        paths = [p for p in paths[:4] if isinstance(p, str)]
+        if paths != self._image_paths:
+            for widget in self._image_widgets:
+                self.layout().removeWidget(widget)
+                widget.deleteLater()
+            self._image_paths = paths
+            self._image_widgets = [GeneratedImage(path, self._image_root, self) for path in paths]
+            for widget in self._image_widgets:
+                self.layout().addWidget(widget)
         return True
 
 
@@ -168,6 +238,7 @@ class AITranscript(QScrollArea):
     def __init__(self, folder, parent=None):
         super().__init__(parent)
         self.folder = folder
+        self.image_root = None
         self.rows = {}
         self._order = []
         self._follow_end = True
@@ -181,9 +252,28 @@ class AITranscript(QScrollArea):
         self.welcome = AIWelcome()
         self.welcome.expansion_changed.connect(self._expanding)
         self.layout.addWidget(self.welcome)
+        self.activity = QFrame()
+        activity_layout = QHBoxLayout(self.activity)
+        activity_layout.setContentsMargins(12, 6, 12, 6)
+        self.activity_label = QLabel()
+        self.activity_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.activity_label.setWordWrap(True)
+        self.activity_label.setStyleSheet(f"color: {theme.bubbles()['ts']};")
+        activity_layout.addWidget(self.activity_label, 1)
+        self.activity.hide()
+        self.layout.addWidget(self.activity)
         self.layout.addStretch(1)
         self.setWidget(self.container)
         self.verticalScrollBar().rangeChanged.connect(self._range_changed)
+
+    def set_activity(self, text, active):
+        changed = text != self.activity_label.text() or active == self.activity.isHidden()
+        self.activity_label.setText(text)
+        self.activity.setVisible(active)
+        if active and changed:
+            self._follow_end = True
+            self.layout.activate()
+            QTimer.singleShot(0, self._scroll_to_end)
 
     def _range_changed(self, _minimum, maximum):
         if self._follow_end:
@@ -205,7 +295,7 @@ class AITranscript(QScrollArea):
             if returning_to_welcome:
                 self.verticalScrollBar().setValue(0)
         visible = [message for message in messages
-                   if message.get("role") == "tool" or message.get("text", "").strip()]
+                   if message.get("role") == "tool" or message.get("text", "").strip() or message.get("images")]
         order = [message["id"] for message in visible]
         changed = order != self._order
         for key in set(self.rows) - set(order):
@@ -217,7 +307,7 @@ class AITranscript(QScrollArea):
             key = message["id"]
             row = self.rows.get(key)
             if row is None:
-                row = TranscriptRow(message, self.folder)
+                row = TranscriptRow(message, self.folder, image_root=self.image_root)
                 row.expansion_changed.connect(self._expanding)
                 self.rows[key] = row
             else:
