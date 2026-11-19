@@ -20,13 +20,16 @@ from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINK
                        application_folder, auth_helper_path, prepare_environment, runtime_command,
                        rpc_command, process_environment)
 from ..core.history import base_dir
-from ..core.ai_timeline import Timeline, restore_messages
+from ..core.ai_timeline import Timeline, message_text, restore_messages
+from ..core.ai_plugins import PLUGINS, disabled_plugins, disabled_tools
 from ..core.ai_catalog import APIModelCatalog
 from ..core.ai_images import (CLOUDFLARE_MODEL, HORDE_MODEL, HORDE_URL, IMAGE_PROVIDERS, ImageGenerator,
                               image_bytes, image_content, wait_for_image_cancellations)
 from ..core.ai_installer import RuntimeInstaller, runtime_environment, supported
 from .ai_transcript import AITranscript
 from .ai_instructions import InstructionsDialog
+from .ai_plugins import panel_title
+from .switch import Switch
 from . import theme
 
 
@@ -147,6 +150,8 @@ def settings_icon():
 
 
 class AITab(QWidget):
+    open_plugin_catalog = pyqtSignal()
+
     @property
     def current(self):
         return self._event_run.chat if self._event_run else self._current
@@ -202,7 +207,9 @@ class AITab(QWidget):
         run = SimpleNamespace(chat=chat, rpc=PiProcess(self), images=ImageGenerator(self),
                               timeline=None, pending=None, stopped=False, error="", activity=("", False),
                               config={}, key="", profile_id="", image_tool_requests={}, image_catalog_requests={},
-                              image_status_requests={}, agent_requests={}, agent_parent_request=None, agent_depth=0, draft="")
+                              image_status_requests={}, agent_requests={}, agent_parent_request=None, agent_depth=0,
+                              draft="", disabled_tools=(), steering={}, followups={}, redirect=None,
+                              using_tools=False, agent_active=False)
         run.attachments = []
         run.sent_images = []
         for signal, handler in ((run.rpc.received, self._event), (run.rpc.error, self._error),
@@ -309,6 +316,7 @@ class AITab(QWidget):
         self._connection_save_timer.timeout.connect(self._persist_connection)
 
         self.folder_label = QPushButton()
+        self.folder_label.setMaximumWidth(150)
         self.folder_label.setText(self.folder_label.fontMetrics().elidedText(self.work_dir, Qt.TextElideMode.ElideMiddle, 180))
         self.folder_label.setToolTip(f"Рабочая папка: {self.work_dir}")
         self.folder_label.setAccessibleName(f"Рабочая папка: {self.work_dir}")
@@ -389,6 +397,13 @@ class AITab(QWidget):
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText("API-ключ; для входа по аккаунту оставьте пустым")
+        self.key_visibility = QPushButton("Показать")
+        self.key_visibility.setCheckable(True)
+        self.key_visibility.setAccessibleName("Показать API-ключ")
+        self.key_visibility.toggled.connect(self._set_key_visible)
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.key, 1)
+        key_row.addWidget(self.key_visibility)
         self.remember = QCheckBox("Сохранить API-ключ средствами Windows")
         self.remember.setEnabled(os.name == "nt")
         self.connection_status = QLabel("Настройки подключения сохраняются автоматически.")
@@ -434,7 +449,7 @@ class AITab(QWidget):
         form.addRow("", self.catalog_btn)
         self.endpoint_label = QLabel("URL API")
         form.addRow(self.endpoint_label, self.endpoint)
-        form.addRow("API-ключ", self.key)
+        form.addRow("API-ключ", key_row)
         form.addRow("", self.remember)
         form.addRow("", self.connection_status)
         form.addRow("Размышления", self.thinking)
@@ -466,13 +481,41 @@ class AITab(QWidget):
         self.stop_btn.clicked.connect(self._stop)
         self.stop_btn.setEnabled(False)
         self.stop_btn.hide()
+        dark = theme.current() == "dark"
+        background = "#1f2630" if dark else "#ffffff"
+        border = "#3a4552" if dark else "#d0d0d0"
+        hover = "#2c3945" if dark else "#ecf7f5"
+        accent = "#63d8ca" if dark else "#0f766e"
+        self.followup_actions = QFrame()
+        self.followup_actions.setObjectName("aiFollowupActions")
+        self.followup_actions.setStyleSheet(
+            f"QFrame#aiFollowupActions {{ background: {background}; border: 1px solid {border}; border-radius: 15px; }}"
+            "QFrame#aiFollowupActions QPushButton { background: transparent; border: 1px solid transparent; border-radius: 11px; padding: 3px 9px; }"
+            f"QFrame#aiFollowupActions QPushButton:hover {{ background: {hover}; }}"
+            f"QFrame#aiFollowupActions QPushButton:focus {{ border-color: {accent}; }}"
+            f"QFrame#aiFollowupActions QPushButton#aiClarifyButton:enabled {{ color: {accent}; }}"
+        )
+        followup_layout = QHBoxLayout(self.followup_actions)
+        followup_layout.setContentsMargins(3, 3, 3, 3)
+        followup_layout.setSpacing(2)
+        self.clarify_btn = QPushButton("Уточнить сейчас")
+        self.clarify_btn.setObjectName("aiClarifyButton")
+        self.clarify_btn.setToolTip("Прервать текущий ответ и отправить уточнение. Если работает инструмент — уточнить после его завершения.")
+        self.clarify_btn.clicked.connect(self._clarify)
+        followup_layout.addWidget(self.clarify_btn)
+        self.queue_btn = QPushButton("В очередь")
+        self.queue_btn.setToolTip("Отправить после завершения текущей задачи (Enter)")
+        self.queue_btn.clicked.connect(self._send)
+        followup_layout.addWidget(self.queue_btn)
+        self.followup_actions.hide()
         for button in (self.send_btn, self.stop_btn):
             button.setFixedSize(32, 32)
+            size_policy = button.sizePolicy()
+            size_policy.setRetainSizeWhenHidden(True)
+            button.setSizePolicy(size_policy)
             button.setStyleSheet("QPushButton { background: #d7dde5; border: none; border-radius: 16px; padding: 0; } QPushButton:hover { background: #ffffff; } QPushButton:disabled { background: #8b95a1; }")
         self.composer = QFrame()
         self.composer.setObjectName("aiComposer")
-        background = "#1f2630" if theme.current() == "dark" else "#ffffff"
-        border = "#3a4552" if theme.current() == "dark" else "#d0d0d0"
         self.composer.setStyleSheet(f"QFrame#aiComposer {{ background: {background}; border: 1px solid {border}; border-radius: 16px; }}")
         self.model.setStyleSheet("QComboBox { background: transparent; border: none; padding: 2px 22px 2px 2px; } QComboBox QLineEdit { background: transparent; border: none; padding: 2px; } QComboBox::drop-down { border: none; width: 22px; } QComboBox::down-arrow { image: none; }")
         composer_layout = QVBoxLayout(self.composer)
@@ -493,11 +536,15 @@ class AITab(QWidget):
         self.attach_btn.setToolTip("Прикрепить картинку; также Ctrl+V или перетаскивание")
         self.attach_btn.clicked.connect(self._choose_images)
         footer.addWidget(self.attach_btn)
+        self.tools_btn = QPushButton("Инструменты")
+        self.tools_btn.setAccessibleName("Инструменты чата")
+        self.tools_btn.clicked.connect(lambda: self.show_chat_tools(self.tools_panel.isHidden()))
+        footer.addWidget(self.tools_btn)
         footer.addStretch(1)
         footer.addWidget(self.model)
         footer.addWidget(self.connection_btn)
-        footer.addWidget(self.send_btn)
         footer.addWidget(self.stop_btn)
+        footer.addWidget(self.send_btn)
         composer_layout.addLayout(footer)
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -575,16 +622,26 @@ class AITab(QWidget):
         settings_close.rejected.connect(self.settings_dialog.close)
         settings_layout.addWidget(settings_close)
         self.settings_dialog.finished.connect(self._persist_connection)
+        self.settings_dialog.finished.connect(lambda _result: self.key_visibility.setChecked(False))
+        self.chat_title = panel_title("")
+        self.chat_title.setTextFormat(Qt.TextFormat.PlainText)
+        right_layout.addWidget(self.chat_title)
         right_layout.addWidget(self.status)
         right_layout.addWidget(self.error_settings_btn, 0, Qt.AlignmentFlag.AlignLeft)
         right_layout.addWidget(self.image_resume_btn, 0, Qt.AlignmentFlag.AlignLeft)
         right_layout.addWidget(self.output, 1)
+        right_layout.addWidget(self.followup_actions, 0, Qt.AlignmentFlag.AlignRight)
         right_layout.addWidget(self.composer)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
         splitter.addWidget(right)
+        self.tools_panel = self._create_chat_tools()
+        splitter.addWidget(self.tools_panel)
+        splitter.setCollapsible(2, False)
+        self.tools_panel.hide()
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([170, 650])
+        splitter.setSizes([170, 650, 240])
+        self.output.open_chat.connect(self._open_ai_chat)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
@@ -596,6 +653,7 @@ class AITab(QWidget):
             self.status.show()
             self.send_btn.setEnabled(False)
             self.new_btn.setEnabled(False)
+            self.tools_btn.setEnabled(False)
             self.connection_panel.setEnabled(False)
             for widget in (self.account, self.account_add, self.account_rename, self.model, self.catalog_btn,
                            self.response_style, self.instructions_btn, self.project_btn, self.folder_label, self.workspace_btn):
@@ -641,8 +699,82 @@ class AITab(QWidget):
         self._provider_visibility()
         self._check_runtime()
 
+    def _create_chat_tools(self):
+        panel = QFrame()
+        panel.setMinimumWidth(220)
+        panel.setMaximumWidth(310)
+        card_color = "#202a35" if theme.current() == "dark" else "#ffffff"
+        panel.setStyleSheet(f"QFrame[toolCard=true] {{ background: {card_color}; border: 1px solid {theme.bubbles()['in']}; border-radius: 8px; }}")
+        layout = QVBoxLayout(panel)
+        heading = QHBoxLayout()
+        heading.addWidget(panel_title("Инструменты чата"), 1)
+        close = QPushButton("×")
+        close.setAccessibleName("Свернуть инструменты чата")
+        close.setFixedWidth(30)
+        close.clicked.connect(lambda: self.show_chat_tools(False))
+        heading.addWidget(close)
+        layout.addLayout(heading)
+        hint = QLabel("Выбор действует для этого чата со следующего запроса.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.plugin_checks = {}
+        for plugin_id, (title, summary, _category, _tools) in PLUGINS.items():
+            card = QFrame()
+            card.setProperty("toolCard", True)
+            entry = QVBoxLayout(card)
+            toggle = Switch(title)
+            toggle.toggled.connect(lambda enabled, key=plugin_id: self._set_chat_plugin(key, enabled))
+            self.plugin_checks[plugin_id] = toggle
+            entry.addWidget(toggle)
+            detail = QLabel(summary)
+            detail.setWordWrap(True)
+            entry.addWidget(detail)
+            layout.addWidget(card)
+        layout.addStretch(1)
+        catalog = QPushButton("Открыть каталог")
+        catalog.clicked.connect(self.open_plugin_catalog.emit)
+        layout.addWidget(catalog)
+        return panel
+
+    def show_chat_tools(self, visible=True):
+        if self.current:
+            self.tools_panel.setVisible(visible)
+
+    def open_plugin_settings(self, plugin_id):
+        if self.current and plugin_id == "images":
+            self._open_connection()
+            if self.image_tool_account.isVisible():
+                self.settings_dialog.findChild(QScrollArea).ensureWidgetVisible(self.image_tool_account)
+                self.image_tool_account.setFocus()
+
+    def _open_ai_chat(self, chat_id):
+        if self.store:
+            index = next((index for index, chat in enumerate(self.store.chats) if chat['id'] == chat_id), None)
+            if index is not None and self.current is not self.store.chats[index]:
+                self._select_chat(index)
+
+    def _sync_chat_tools(self):
+        disabled = disabled_plugins(self.current or {})
+        for plugin_id, toggle in self.plugin_checks.items():
+            prior = toggle.blockSignals(True)
+            toggle.setChecked(plugin_id not in disabled)
+            toggle.blockSignals(prior)
+        self.tools_btn.setText(f"Инструменты {len(PLUGINS) - len(disabled)}")
+
+    def _set_chat_plugin(self, plugin_id, enabled):
+        if not self.current:
+            return
+        disabled = set(disabled_plugins(self.current))
+        if enabled:
+            disabled.discard(plugin_id)
+        else:
+            disabled.add(plugin_id)
+        self.current['disabled_plugins'] = [key for key in PLUGINS if key in disabled]
+        self._save()
+        self._sync_chat_tools()
+
     def _task_busy(self):
-        return self.rpc.busy or self.images.busy
+        return self.rpc.busy or self.images.busy or bool(self._run().redirect)
 
     def _select_free_images(self):
         if not self.store or self._task_busy() or self._pending or self._installing or self._logging_in:
@@ -740,6 +872,7 @@ class AITab(QWidget):
             self._stop_auth()
             self.api_catalog.cancel()
             self.store.select_profile(profile_id)
+            self.key_visibility.setChecked(False)
             self.vault = KeyVault(self.store.profile_root())
             self._loading_profile = True
             widgets = (self.provider, self.model, self.endpoint, self.runtime, self.thinking,
@@ -1053,6 +1186,7 @@ class AITab(QWidget):
         if self.current["id"] not in self._runs:
             self._runs[self.current["id"]] = self._make_run(self.current)
         self._selected_run = self._runs[self.current["id"]]
+        self._sync_chat_tools()
         self.current["unread_result"] = False
         self._update_chat_item(self.current)
         self._restore_chat_selection()
@@ -1272,8 +1406,14 @@ class AITab(QWidget):
         except (OSError, ValueError) as exc:
             self.connection_status.setText(f"Не удалось сохранить подключение: {exc}")
 
+    def _set_key_visible(self, visible):
+        self.key.setEchoMode(QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password)
+        self.key_visibility.setText("Скрыть" if visible else "Показать")
+        self.key_visibility.setAccessibleName("Скрыть API-ключ" if visible else "Показать API-ключ")
+
     def _provider_changed(self):
         self._auth_notice = None
+        self.key_visibility.setChecked(False)
         self.key.clear()
         self.remember.setChecked(False)
         self._last_provider = self.provider.currentData()
@@ -1308,6 +1448,7 @@ class AITab(QWidget):
         self.input.setPlaceholderText("Опишите картинку. Enter — создать, Shift+Enter — новая строка" if image_mode else "Задача для агента. Enter — отправить, Shift+Enter — новая строка")
         self.key.setPlaceholderText("Необязательный ключ AI Horde; без ключа — анонимная очередь" if provider == "ai-horde" else "API-ключ; для входа по аккаунту оставьте пустым")
         self.key.setEnabled(bool(PROVIDERS[provider][1]))
+        self.key_visibility.setEnabled(self.key.isEnabled())
         self.login_btn.setVisible(account)
         self.login_btn.setEnabled(account and not self._logging_in)
         self.logout_btn.setText("Выйти из аккаунта" if account else "Отключить API-ключ")
@@ -1351,6 +1492,11 @@ class AITab(QWidget):
 
     def _send(self):
         text = self.input.toPlainText().strip()
+        if self._can_followup():
+            if self.send_btn.isEnabled() and self._followup_text_ready(text):
+                self._run().followups[str(uuid.uuid4())] = text
+                self._followup_added()
+            return
         if (not text and not self._run().attachments) or not self.store or not self.current or self._task_busy() or self._pending or not self.send_btn.isEnabled():
             return
         text = text or "Опиши прикреплённые изображения."
@@ -1380,6 +1526,10 @@ class AITab(QWidget):
     def _start_text_run(self, text):
         run = self._run()
         config = run.config
+        excluded = disabled_tools(self.current)
+        if self.rpc.ready and run.disabled_tools != excluded:
+            self.rpc.shutdown()
+        run.disabled_tools = excluded
         if run.timeline is None:
             run.timeline = Timeline(self.current["messages"], self.rpc.redact)
         if self.rpc.ready:
@@ -1397,6 +1547,7 @@ class AITab(QWidget):
             [{"id": p["id"], "name": p["name"], "model": p["config"]["model"], "default": p["default"]}
              for p in run.image_connections], ensure_ascii=False)
         env["LANMESSENGER_AGENT_DEPTH"] = str(run.agent_depth)
+        env["LANMESSENGER_DISABLED_TOOLS"] = json.dumps(excluded)
         args += ["--mode", "rpc", "--provider", config["provider"], "--model", config["model"],
                  "--session", self.current["session"], "--no-extensions", "--no-prompt-templates"]
         if config["thinking"] != "auto":
@@ -1427,19 +1578,22 @@ class AITab(QWidget):
         else:
             self.rpc.send_prompt(text)
 
-    def _begin_task(self, text, image=False):
+    def _begin_task(self, text, image=False, followup_id=None):
         self._stopped = False
         self._task_error = ""
+        self._run().using_tools = False
+        self._run().agent_active = False
         self.current.pop("last_error", None)
         if image:
             self.current.pop("image_queue", None)
         if self._visible_run():
             self.status.hide()
             self.error_settings_btn.hide()
-        attachments = self._run().sent_images
-        if self._run().agent_parent_request:
+        attachments = [] if followup_id else self._run().sent_images
+        if self._run().agent_parent_request and not followup_id:
             self._run().agent_parent_request["start"] = len(self.current["messages"])
-        self.current["messages"].append({"role": "user", "text": text,
+        self.current["messages"].append({"role": "user", "text": self.rpc.redact(text) if followup_id else text,
+                                         **({"id": followup_id} if followup_id else {}),
                                          **({"images": list(attachments), "attachment_message": True} if attachments else {}),
                                          **({"image_message": True} if image else {})})
         self.timeline = Timeline(self.current["messages"], self.rpc.redact)
@@ -1456,9 +1610,10 @@ class AITab(QWidget):
         self._update_chat_item(self.current)
         self._fill_chats()
         self._save()
-        if self._visible_run() and self.input.toPlainText().strip() == text:
-            self.input.clear()
-        self._run().draft = ""
+        if not followup_id:
+            if self._visible_run() and self.input.toPlainText().strip() == text:
+                self.input.clear()
+            self._run().draft = ""
         self._run().attachments = [path for path in self._run().attachments if path not in attachments]
         if self._visible_run():
             self._render_attachments()
@@ -1489,6 +1644,9 @@ class AITab(QWidget):
         self._save()
 
     def _image_cancelled(self, job):
+        if (self.current and not self._closed and (self.current.get("image_job") == job
+                or (self.current.get("outcome") == "stopped" and not self.current.get("running")))):
+            self._update_image_activity("cancelled")
         if self.current and self.current.get("image_job") == job and not self._closed:
             self.current.pop("image_job", None)
             self._save()
@@ -1499,10 +1657,35 @@ class AITab(QWidget):
         if self._closed or not self.current:
             return
         self.current["image_queue"] = status
+        queue = []
+        if type(status.get("queue_position")) is int and status["queue_position"] > 0:
+            queue.append(f"место {status['queue_position']}")
+        if type(status.get("estimated_wait_seconds")) is int and status["estimated_wait_seconds"] >= 0:
+            queue.append(f"оценка сервиса ~{status['estimated_wait_seconds']} с")
+        self._update_image_activity(status.get("state", "queued"), " · ".join(queue))
         self._save()
         request = getattr(self._run(), "parent_request", None)
         if request:
             self._dispatch_run(request["run"], self._report_image_queue, request["id"])
+
+    def _update_image_activity(self, state, detail=""):
+        child = self.current
+        parent_id = child.get("parent_chat_id") if child else None
+        if not parent_id:
+            return
+        parent = next((chat for chat in self.store.chats if chat["id"] == parent_id), None)
+        if not parent:
+            return
+        card_id = "image-activity:" + child["id"]
+        message = next((row for row in parent["messages"] if row.get("id") == card_id), None)
+        if message is None:
+            message = {"id": card_id, "role": "image_activity", "job_chat_id": child["id"]}
+            parent["messages"].append(message)
+        model = child.get("model", "Изображение")
+        message.update(model=model, status=state, text=model + (" · " + self.rpc.redact(detail) if detail else ""))
+        self._save()
+        if self._selected_run.chat is parent:
+            self._dispatch_run(self._selected_run, self._render)
 
     def _image_snapshot(self, chat):
         run = self._runs.get(chat["id"])
@@ -1735,9 +1918,12 @@ class AITab(QWidget):
                 batch["pending"].add(chat["id"])
                 self._dispatch_run(child, self._begin_task, params["prompt"], True)
                 chat["title"] = "Картинка · " + model + ": " + params["prompt"].replace("\n", " ")[:35]
+                self._dispatch_run(child, self._update_image_activity, "submitting")
             self._fill_chats()
             for child in batch["children"]:
                 try:
+                    if config["provider"] != "ai-horde":
+                        self._dispatch_run(child, self._update_image_activity, "processing")
                     self._dispatch_run(child, child.images.generate, config["provider"], config["endpoint"], child.config["model"],
                                        connection["key"], params["prompt"], self.store.root / "images" / child.chat["id"])
                 except (OSError, ValueError) as exc:
@@ -1750,6 +1936,7 @@ class AITab(QWidget):
 
     def _image_failed(self, text):
         request = getattr(self._run(), "parent_request", None)
+        self._update_image_activity("failed", text)
         self._error(text)
         if request:
             self._run().parent_request = None
@@ -1797,6 +1984,7 @@ class AITab(QWidget):
         parent_id = self.current.get("parent_chat_id")
         parent_chat = next((c for c in self.store.chats if c["id"] == parent_id), None)
         if parent_chat:
+            self._update_image_activity("completed")
             parent_chat["messages"].append({"id": str(uuid.uuid4()), "role": "assistant", "text": "Изображение · " + self.current["model"] + ". Из чата «" + self.current["title"] + "».",
                                              "images": paths, "image_message": True, "status": "completed",
                                              "source_chat_id": self.current["id"]})
@@ -1814,14 +2002,16 @@ class AITab(QWidget):
         request = getattr(self._run(), "parent_request", None)
         if request:
             self._run().parent_request = None
-            self._dispatch_run(request["run"], self._render)
             self._dispatch_run(request["run"], self._relay_image_result, request, paths)
+        if parent_chat is self._selected_run.chat and parent_chat:
+            self._dispatch_run(self._selected_run, self._render)
 
     def _resume_image(self):
         if not self.current or not self.current.get("image_job") or self._task_busy():
             return
         try:
             self.current.update(running=True, interrupted=False)
+            self._update_image_activity("submitting", "Проверяет сохранённое задание")
             self.timeline = Timeline(self.current["messages"], self.rpc.redact)
             self.image_resume_btn.hide()
             self.status.hide()
@@ -1834,16 +2024,25 @@ class AITab(QWidget):
     def _controls(self, active):
         if not self._visible_run():
             return
-        active = active or self.images.busy
+        active = active or self.images.busy or bool(self._run().redirect)
         for widget in (self.account, self.account_add, self.account_rename, self.model, self.settings_model,
                        self.catalog_btn, self.folder_label, self.project_btn, self.workspace_btn):
             widget.setEnabled(not active and not self._logging_in and not self._installing)
         self.response_style.setEnabled(not active and not self._logging_in and not self._installing and self.provider.currentData() not in IMAGE_PROVIDERS)
         self.instructions_btn.setEnabled(self.response_style.isEnabled())
-        self.send_btn.setEnabled(not active and not self._logging_in and not self._installing and bool(self.current) and Path(self.work_dir).is_dir())
+        show_followups = self.rpc.ready and (self.rpc.busy or bool(self._run().redirect)) and not self.images.busy
+        can_followup = self._can_followup()
+        self.send_btn.setEnabled((not active or can_followup) and not self._logging_in and not self._installing and bool(self.current) and Path(self.work_dir).is_dir())
+        self.send_btn.setAccessibleName("В очередь" if show_followups else "Отправить сообщение")
+        self.send_btn.setToolTip(self.queue_btn.toolTip() if show_followups else "Отправить сообщение")
+        self.input.setPlaceholderText("Новое сообщение. Enter — в очередь" if show_followups else
+                                      "Задача для агента. Enter — отправить, Shift+Enter — новая строка")
+        self.followup_actions.setVisible(show_followups)
+        self.queue_btn.setEnabled(can_followup and self.send_btn.isEnabled())
+        self.clarify_btn.setEnabled(can_followup and self.send_btn.isEnabled() and self._run().agent_active)
         self.stop_btn.setEnabled(active)
         self.stop_btn.setVisible(active)
-        self.send_btn.setVisible(not active)
+        self.send_btn.setVisible(not active or show_followups)
         if not active:
             self.output.set_activity("", False)
         self.new_btn.setEnabled(not self._logging_in and not self._installing)
@@ -1862,8 +2061,74 @@ class AITab(QWidget):
             # Only agent_end confirms successful completion; process errors mark interruption.
             self._save_timer.start(100)
 
+    def _can_followup(self):
+        return (self.rpc.ready and self.rpc.busy and not self._stopped and not self._pending and
+                not self.images.busy and not self._run().redirect)
+
+    def _followup_text_ready(self, text):
+        if self._run().attachments:
+            self.status.setText("Во время задачи можно отправлять только текст. Вложения отправьте после завершения.")
+            self.status.show()
+            return False
+        if not text:
+            self.input.setFocus()
+        return bool(text)
+
+    def _clarify(self):
+        text = self.input.toPlainText().strip()
+        if not self._can_followup() or not self.clarify_btn.isEnabled() or not self._followup_text_ready(text):
+            return
+        run = self._run()
+        request_id = str(uuid.uuid4())
+        try:
+            if run.using_tools or run.steering:
+                self.rpc.steer(request_id, text)
+                run.steering[request_id] = text
+            else:
+                self.rpc.abort(request_id)
+                run.redirect = (request_id, text)
+                self._controls(True)
+                self._set_activity("Прерывает ответ для уточнения…", True)
+        except RuntimeError as exc:
+            self.status.setText(str(exc))
+            self.status.show()
+            return
+        self._followup_added()
+
+    def _followup_added(self):
+        self.input.clear()
+        self.input.setFocus()
+        self._run().draft = ""
+        self._render()
+
+    def _start_followup(self, request_id, text):
+        self._begin_task(text, followup_id=request_id)
+        try:
+            self.rpc.send_prompt(text)
+        except RuntimeError as exc:
+            self._error(str(exc))
+
+    def _take_followups(self):
+        run = self._run()
+        pending = list(run.steering.values()) + list(run.followups.values())
+        if run.redirect:
+            pending.insert(0, run.redirect[1])
+        run.steering.clear()
+        run.followups.clear()
+        run.redirect = None
+        return pending
+
+    def _steering_not_delivered(self, pending):
+        if not pending:
+            return
+        self.current["messages"].extend({"role": "system", "text": "Дополнение не доставлено: " + self.rpc.redact(text)}
+                                        for text in pending)
+        self._save()
+        self._render()
+
     def _stop(self):
         self._stopped = True
+        self._controls(self._task_busy() or bool(self._pending))
         self._cancel_agent_requests()
         self._cancel_image_catalogs()
         batches = self._run().image_tool_requests
@@ -1877,6 +2142,7 @@ class AITab(QWidget):
             self.images.cancel()
             self.current.pop("image_job", None)
             self.current.update(running=False, interrupted=False, outcome="stopped")
+            self._update_image_activity("stopped")
             self.current["unread_result"] = False
             self._set_activity("", False)
             self._update_chat_item(self.current)
@@ -1908,6 +2174,7 @@ class AITab(QWidget):
     def _error(self, text):
         if self._closed:
             return
+        self._steering_not_delivered(self._take_followups())
         self._cancel_agent_requests()
         self._cancel_image_catalogs()
         batches = self._run().image_tool_requests
@@ -1918,6 +2185,7 @@ class AITab(QWidget):
                     child.parent_request = None
                     child.images.cancel(remote=False)
                     child.chat.update(running=False, interrupted=True)
+                    self._dispatch_run(child, self._update_image_activity, "interrupted")
                     child.activity = ("", False)
                     self._update_chat_item(child.chat)
         if self._pending and not self._run().draft:
@@ -1974,6 +2242,35 @@ class AITab(QWidget):
         if not self.current:
             return
         kind = event.get("type")
+        run = self._run()
+        if kind in ("agent_start", "agent_end"):
+            run.agent_active = kind == "agent_start"
+            if run.agent_active:
+                self._controls(True)
+        if kind == "response" and event.get("command") == "abort" and run.redirect and event.get("id") == run.redirect[0]:
+            if event.get("success"):
+                if self._stopped:
+                    self._finish_text_run("stopped")
+                else:
+                    request_id, text = run.redirect
+                    run.redirect = None
+                    self._start_followup(request_id, text)
+            return
+        if kind == "response" and event.get("command") == "steer":
+            if not event.get("success"):
+                text = self._run().steering.pop(event.get("id"), None)
+                if text is not None:
+                    self._steering_not_delivered([text])
+            return
+        if kind == "message_start" and event.get("message", {}).get("role") == "user":
+            text = message_text(event["message"])
+            pending = self._run().steering
+            request_id = next((key for key, value in pending.items() if text == value), None)
+            if request_id:
+                pending.pop(request_id)
+                self.current["messages"].append({"id": request_id, "role": "user", "text": self.rpc.redact(text)})
+                self._save()
+                self._render()
         if kind == "extension_ui_request" and event.get("method") == "input" and event.get("title") in ("lanmessenger.ask_agent", "lanmessenger.list_agent_models"):
             self._agent_request(event)
             return
@@ -2029,7 +2326,8 @@ class AITab(QWidget):
             lost_context = bool(messages) and not restored
             archived = self.current.get("archived_messages", [])
             archived_ids = {m.get("id") for m in archived}
-            local_images = [m for m in messages if m.get("image_message") and m.get("id") not in archived_ids]
+            local_images = [m for m in messages if (m.get("image_message") or m.get("role") == "image_activity")
+                            and m.get("id") not in archived_ids]
             if restored and local_images:
                 archived = list(archived) + local_images
                 self.current["archived_messages"] = archived
@@ -2050,34 +2348,27 @@ class AITab(QWidget):
                 except RuntimeError as exc:
                     self._error(str(exc))
             return
+        if kind == "tool_execution_start":
+            run.using_tools = True
+        if kind == "message_start" and event.get("message", {}).get("role") == "assistant":
+            run.using_tools = False
         if kind == "message_end" and event.get("message", {}).get("role") == "assistant":
             message = event["message"]
-            if message.get("stopReason") == "error" or (message.get("stopReason") == "aborted" and not self._stopped):
+            reason = message.get("stopReason")
+            run.using_tools = reason == "toolUse"
+            if reason == "error" or (reason == "aborted" and not self._stopped and not run.redirect):
                 self._task_error = self.rpc.redact(message.get("errorMessage") or "Провайдер прервал выполнение задачи")
         self.timeline.event(event)
         if kind == "agent_end":
-            outcome = "stopped" if self._stopped else "failed" if self._task_error else "completed"
-            self.timeline.finish(outcome)
-            self.current["running"] = False
-            self.current["interrupted"] = outcome == "failed"
-            self.current["outcome"] = outcome
-            self._mark_chat_result(self.current, outcome)
-            if outcome == "failed":
-                guidance = self._error_guidance(self._task_error)
-                self.current["last_error"] = guidance
-                messages.append({"role": "system", "text": guidance})
-                if self._visible_run():
-                    self.status.setText(guidance)
-            elif self._visible_run():
-                self.status.setText("Агент остановлен." if self._stopped else "Задача завершена.")
-            if self._visible_run():
-                self.status.setVisible(outcome == "failed")
-                self.error_settings_btn.setVisible(outcome == "failed")
-            self._set_activity("", False)
-            self._update_chat_item(self.current)
-            self._controls(False)
-            self._save()
-            self._finish_agent_request(outcome)
+            if run.redirect:
+                self.timeline.finish("stopped")
+                self._save()
+            else:
+                outcome = "stopped" if self._stopped else "failed" if self._task_error else "completed"
+                self._finish_text_run(outcome)
+                if outcome == "completed" and run.followups:
+                    request_id = next(iter(run.followups))
+                    self._start_followup(request_id, run.followups.pop(request_id))
         elif kind == "extension_ui_request":
             # Discovered extensions are disabled. Never leave an explicit extension dialog hanging.
             method = event.get("method")
@@ -2088,6 +2379,33 @@ class AITab(QWidget):
                 self._render_timer.start(50)
             if not self._save_timer.isActive():
                 self._save_timer.start(300)
+
+    def _finish_text_run(self, outcome):
+        if outcome == "completed":
+            pending = list(self._run().steering.values())
+            self._run().steering.clear()
+        else:
+            pending = self._take_followups()
+        self._steering_not_delivered(pending)
+        self.timeline.finish(outcome)
+        self.current.update(running=False, interrupted=outcome == "failed", outcome=outcome)
+        self._mark_chat_result(self.current, outcome)
+        if outcome == "failed":
+            guidance = self._error_guidance(self._task_error)
+            self.current["last_error"] = guidance
+            self.current["messages"].append({"role": "system", "text": guidance})
+            if self._visible_run():
+                self.status.setText(guidance)
+        elif self._visible_run():
+            self.status.setText("Агент остановлен." if outcome == "stopped" else "Задача завершена.")
+        if self._visible_run():
+            self.status.setVisible(outcome == "failed")
+            self.error_settings_btn.setVisible(outcome == "failed")
+        self._set_activity("", False)
+        self._update_chat_item(self.current)
+        self._controls(False)
+        self._save()
+        self._finish_agent_request(outcome)
 
     def _cancel_agent_requests(self):
         requests = self._run().agent_requests
@@ -2270,11 +2588,19 @@ class AITab(QWidget):
     def _render(self):
         if not self.current or not self._visible_run():
             return
+        self.chat_title.setText(self.current["title"])
         # Also assign stable identities to legacy/system entries appended outside the projection.
         for message in self.current["messages"]:
             if "id" not in message:
                 message["id"] = str(uuid.uuid4())
-        self.output.set_messages(self.current["messages"])
+        run = self._run()
+        pending = [(request_id, text, "steering") for request_id, text in run.steering.items()]
+        if run.redirect:
+            pending.append((*run.redirect, "redirecting"))
+        pending.extend((request_id, text, "queued") for request_id, text in run.followups.items())
+        self.output.set_messages(self.current["messages"] + [
+            {"id": request_id, "role": "user", "text": self.rpc.redact(text), "status": status}
+            for request_id, text, status in pending])
 
     def _start_auth(self):
         if self._installing:
@@ -2538,6 +2864,10 @@ class AITab(QWidget):
             run.image_tool_requests = {}
             run.parent_request = None
             run.pending = None
+            if run.chat:
+                pending = self._dispatch_run(run, self._take_followups)
+                run.chat["messages"].extend({"role": "system", "text": "Дополнение не доставлено: " + run.rpc.redact(text)}
+                                            for text in pending)
             if run.chat and run.chat.get("running"):
                 if run.timeline:
                     run.timeline.finish("interrupted")
@@ -2552,8 +2882,10 @@ class AITab(QWidget):
                 run.chat.pop("image_job", None)
                 run.chat.update(running=False, interrupted=False, outcome="stopped", unread_result=False)
                 text = "При выходе из приложения AI Horde подтвердил запрос отмены генерации."
+                self._dispatch_run(run, self._update_image_activity, "cancelled")
             else:
                 run.chat.update(running=False, interrupted=True)
+                self._dispatch_run(run, self._update_image_activity, "interrupted")
                 text = ("Приложение закрыто. Отмена генерации на сервере не подтверждена; работа может продолжаться. "
                         "Сохранённое задание можно проверить кнопкой «Получить результат генерации»." if job else
                         "Ожидание изображения прекращено при выходе. Сервер мог продолжить уже отправленную генерацию.")

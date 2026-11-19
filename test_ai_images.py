@@ -244,6 +244,11 @@ class ImageTests(unittest.TestCase):
                 self.assertEqual(child["outcome"], "completed")
                 self.assertTrue(child["messages"][-1]["images"])
                 self.assertTrue(any(m.get("source_chat_id") == child["id"] for m in parent["messages"]))
+                activity = next(m for m in parent["messages"] if m.get("role") == "image_activity")
+                self.assertEqual((activity["status"], activity["job_chat_id"]), ("completed", child["id"]))
+                self.assertIn("Готово", tab.output.rows[activity["id"]].header.text())
+                tab.output.rows[activity["id"]].open_chat.emit(child["id"])
+                self.assertIs(tab.current, child)
                 self.assertEqual(len(self.requests), 1)
                 self.assertEqual(self.requests[0][2]["authorization"], "Bearer image-fixture-key")
                 self.assertEqual(len(server.requests), 2)
@@ -254,6 +259,108 @@ class ImageTests(unittest.TestCase):
             finally:
                 tab.shutdown(); tab.close()
                 server.shutdown(); server.server_close()
+
+    def test_real_pi_accepts_an_active_followup_and_reloads_the_per_chat_tool_selection(self):
+        from test_ai_pi import LocalAPI
+        with tempfile.TemporaryDirectory() as root:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), LocalAPI)
+            server.requests = []
+            release = threading.Event()
+
+            def hold_first_response(_request, count):
+                if count == 1:
+                    release.wait(10)
+
+            server.tool_plan = hold_first_response
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            tab = AITab(data_dir=root, work_dir=self.temp.name)
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+                tab.endpoint.setText(f"http://127.0.0.1:{server.server_port}/v1")
+                tab.model.setEditText("test-model")
+                tab.key.setText("text-fixture-key")
+                tab.plugin_checks["images"].click()
+                tab.input.setPlainText("Первая задача")
+                tab._send()
+                wait_for(lambda: len(server.requests) == 1, timeout=20)
+                names = {entry["function"]["name"] for entry in server.requests[0]["tools"]}
+                self.assertNotIn("generate_image", names)
+                self.assertIn("ask_agent", names)
+                tab.input.setPlainText("А вот ещё условие")
+                tab._send()
+                self.assertEqual(list(tab._run().followups.values()), ["А вот ещё условие"])
+                self.assertEqual(len(server.requests), 1)
+                release.set()
+                wait_for(lambda: len(server.requests) == 2 and not tab.current.get("running"), timeout=20)
+                self.assertEqual(tab.current["outcome"], "completed", tab.current.get("last_error"))
+                self.assertTrue(any("А вот ещё условие" in json.dumps(request["messages"], ensure_ascii=False)
+                                    for request in server.requests[1:]))
+                self.assertEqual([row["text"] for row in tab.current["messages"] if row["role"] == "user"],
+                                 ["Первая задача", "А вот ещё условие"])
+                tab.plugin_checks["images"].click()
+                tab.input.setPlainText("Ещё запрос")
+                tab._send()
+                wait_for(lambda: len(server.requests) >= 3 and not tab.current.get("running"), timeout=20)
+                names = {entry["function"]["name"] for entry in server.requests[-1]["tools"]}
+                self.assertIn("generate_image", names)
+                self.assertEqual([row["text"] for row in tab.current["messages"] if row["role"] == "user"],
+                                 ["Первая задача", "А вот ещё условие", "Ещё запрос"])
+            finally:
+                release.set()
+                tab.shutdown()
+                tab.close()
+                server.shutdown()
+                server.server_close()
+
+    def test_real_pi_clarification_interrupts_stream_before_queued_request(self):
+        from app.core.ai_timeline import message_text
+        from test_ai_pi import LocalAPI
+        with tempfile.TemporaryDirectory() as root:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), LocalAPI)
+            server.requests = []
+            server.tool_plan = lambda *_args: None
+            release = threading.Event()
+            server.after_delta = lambda number: release.wait(20) if number == 1 else None
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            tab = AITab(data_dir=root, work_dir=self.temp.name)
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+                tab.endpoint.setText(f"http://127.0.0.1:{server.server_port}/v1")
+                tab.model.setEditText("test-model")
+                tab.key.setText("text-fixture-key")
+                tab.input.setPlainText("Первая задача")
+                tab._send()
+                wait_for(lambda: any(row["role"] == "assistant" for row in tab.current["messages"]), timeout=10)
+                tab.input.setPlainText("Это после задачи")
+                tab.send_btn.click()
+                tab.input.setPlainText("Уточнение к текущей задаче")
+                tab.clarify_btn.click()
+                wait_for(lambda: len(server.requests) == 3 and not tab.current.get("running"), timeout=10)
+                self.assertFalse(release.is_set(), "Новый запрос должен начаться до завершения исходного потока")
+                self.assertEqual(tab.current["outcome"], "completed", tab.current.get("last_error"))
+                self.assertEqual([next(message_text(row) for row in reversed(request["messages"]) if row["role"] == "user")
+                                  for request in server.requests], ["Первая задача", "Уточнение к текущей задаче", "Это после задачи"])
+                self.assertEqual([row["role"] for row in tab.current["messages"]], ["user", "assistant"] * 3)
+                self.assertEqual(tab.current["messages"][1]["text"], "Файл создан локальным агентом.")
+                self.assertEqual(tab.current["messages"][1]["status"], "stopped")
+                session = [json.loads(line) for line in Path(tab.current["session"]).read_text(encoding="utf-8").splitlines()]
+                aborted = next(entry["message"] for entry in session if entry.get("message", {}).get("stopReason") == "aborted")
+                self.assertEqual(message_text(aborted), "Файл создан локальным агентом.")
+            finally:
+                release.set()
+                tab.shutdown()
+                tab.close()
+                server.shutdown()
+                server.server_close()
+            reopened = AITab(data_dir=root, work_dir=self.temp.name)
+            try:
+                self.assertEqual([row["text"] for row in reopened.current["messages"] if row["role"] == "user"],
+                                 ["Первая задача", "Уточнение к текущей задаче", "Это после задачи"])
+                self.assertEqual(reopened.current["messages"][1]["text"], "Файл создан локальным агентом.")
+                self.assertEqual(reopened.output.rows[reopened.current["messages"][1]["id"]].header.text(), "Агент · Ответ прерван")
+            finally:
+                reopened.shutdown()
+                reopened.close()
 
     def test_image_paste_drop_send_and_preview_survive_session_reconciliation(self):
         from PyQt6.QtCore import QMimeData, QUrl

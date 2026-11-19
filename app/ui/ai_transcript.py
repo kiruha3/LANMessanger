@@ -19,8 +19,15 @@ from .ai_welcome import AIWelcome
 
 STATUS = {"queued": "Ожидает", "running": "Выполняется…", "completed": "Завершено",
           "failed": "Ошибка", "stopped": "Остановлено", "interrupted": "Прервано"}
+IMAGE_STATUS = {"submitting": "Отправка", "queued": "В очереди", "processing": "Генерируется",
+                "completed": "Готово", "failed": "Ошибка", "stopped": "Ожидание остановлено",
+                "cancelled": "Отменено", "interrupted": "Проверить результат"}
 TOOL_NAMES = {"bash": "Команда", "read": "Чтение", "write": "Запись", "edit": "Изменение",
-              "grep": "Поиск", "find": "Поиск файлов", "ls": "Список файлов"}
+              "grep": "Поиск", "find": "Поиск файлов", "ls": "Список файлов",
+              "generate_image": "Запрос на генерацию", "get_image_status": "Проверка очереди",
+              "ask_agent": "Вопрос другому агенту", "read_chat": "Чтение ИИ-чата",
+              "list_chats": "Поиск ИИ-чатов", "list_image_models": "Модели изображений",
+              "cancel_image_generation": "Запрос отмены генерации", "list_agent_models": "Модели агентов"}
 
 
 class MessageBody(QTextBrowser):
@@ -149,6 +156,7 @@ class GeneratedImage(QWidget):
 
 class TranscriptRow(QFrame):
     expansion_changed = pyqtSignal()
+    open_chat = pyqtSignal(str)
 
     def __init__(self, message, folder, parent=None, image_root=None):
         super().__init__(parent)
@@ -171,6 +179,12 @@ class TranscriptRow(QFrame):
             self.header.setStyleSheet(f"QToolButton {{ border: none; text-align: left; color: {colors['ts']}; padding: 3px; }}")
             self.header.toggled.connect(self._toggle)
             self.setStyleSheet(f"TranscriptRow {{ border: 1px solid {colors['in']}; border-radius: 6px; }}")
+        elif self.role == "image_activity":
+            self.header = QLabel()
+            self.header.setWordWrap(True)
+            self.header.setTextFormat(Qt.TextFormat.PlainText)
+            self.header.setStyleSheet(f"color: {colors['accent']}; font-weight: bold;")
+            self.setStyleSheet(f"TranscriptRow {{ border: 1px solid {colors['in']}; border-radius: 9px; }}")
         else:
             self.header = QLabel({"user": "Вы", "assistant": "Агент", "system": "Состояние"}.get(self.role, "Сообщение"))
             self.header.setTextFormat(Qt.TextFormat.PlainText)
@@ -180,6 +194,10 @@ class TranscriptRow(QFrame):
         layout.addWidget(self.header)
         self.body = MessageBody(folder, parent=self)
         layout.addWidget(self.body)
+        if self.role == "image_activity":
+            open_source = QPushButton("Открыть чат генерации")
+            open_source.clicked.connect(lambda: self.open_chat.emit(message["job_chat_id"]))
+            layout.addWidget(open_source, alignment=Qt.AlignmentFlag.AlignLeft)
         self.update_message(message)
 
     def _toggle(self, expanded):
@@ -194,6 +212,20 @@ class TranscriptRow(QFrame):
             return False
         self._snapshot = snapshot
         text = message.get("text", "")
+        if self.role == "image_activity":
+            status = IMAGE_STATUS.get(message.get("status"), "Неизвестно")
+            self.header.setText(f"Генерация изображений · {status}")
+        elif self.role == "user":
+            status = message.get("status")
+            label, tip = {
+                "queued": ("В очереди", "Агент получит сообщение после завершения текущей задачи"),
+                "steering": ("После инструмента", "Агент получит уточнение после текущего действия"),
+                "redirecting": ("Уточнение", "Текущий ответ прерывается, чтобы применить уточнение"),
+            }.get(status, ("", ""))
+            self.header.setText(f"Вы · {label}" if label else "Вы")
+            self.header.setToolTip(tip)
+        elif self.role == "assistant":
+            self.header.setText("Агент · Ответ прерван" if message.get("status") == "stopped" else "Агент")
         if self.expandable:
             status = message.get("status", "completed")
             if self.role == "thinking":
@@ -235,6 +267,8 @@ class TranscriptRow(QFrame):
 
 
 class AITranscript(QScrollArea):
+    open_chat = pyqtSignal(str)
+
     def __init__(self, folder, parent=None):
         super().__init__(parent)
         self.folder = folder
@@ -294,8 +328,8 @@ class AITranscript(QScrollArea):
             self._follow_end = False
             if returning_to_welcome:
                 self.verticalScrollBar().setValue(0)
-        visible = [message for message in messages
-                   if message.get("role") == "tool" or message.get("text", "").strip() or message.get("images")]
+        visible = [message for message in messages if message.get("role") in ("tool", "image_activity")
+                   or message.get("text", "").strip() or message.get("images")]
         order = [message["id"] for message in visible]
         changed = order != self._order
         for key in set(self.rows) - set(order):
@@ -309,6 +343,7 @@ class AITranscript(QScrollArea):
             if row is None:
                 row = TranscriptRow(message, self.folder, image_root=self.image_root)
                 row.expansion_changed.connect(self._expanding)
+                row.open_chat.connect(self.open_chat.emit)
                 self.rows[key] = row
             else:
                 changed = row.update_message(message) or changed

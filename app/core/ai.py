@@ -119,6 +119,11 @@ class AIStore:
                     if chat.get("running"):
                         chat["interrupted"] = True
                         chat["running"] = False
+                    for message in chat["messages"]:
+                        if (isinstance(message, dict) and message.get("role") == "image_activity"
+                                and message.get("status") in ("submitting", "queued", "processing")):
+                            message["status"] = "interrupted"
+                            message["text"] = message.get("model", "") + " · Последний статус не подтверждён после запуска."
                 self.profiles = data.get("profiles", [])
                 self.active_profile = data.get("active_profile", "default")
                 if not isinstance(self.profiles, list):
@@ -361,6 +366,7 @@ class PiProcess(QObject):
         self._deadline.setSingleShot(True)
         self._deadline.timeout.connect(self._timeout)
         self._stopping = False
+        self._abort_request = None
 
     def start(self, program: str, args: list[str], cwd: str, env: dict):
         self.shutdown()
@@ -368,6 +374,7 @@ class PiProcess(QObject):
         self._parser = JsonLines()
         self._stderr = ""
         self._stopping = False
+        self._abort_request = None
         self._secrets = [v for k, v in env.items() if "KEY" in k and v]
         environment = process_environment(env)
         self.process.setProcessEnvironment(environment)
@@ -394,10 +401,16 @@ class PiProcess(QObject):
         self.command({"id": str(uuid.uuid4()), "type": "prompt", "message": text, **({"images": images} if images else {})})
         self._deadline.start(45000)
 
-    def abort(self):
+    def steer(self, request_id: str, text: str):
+        if not self.ready or not self.busy or self._stopping:
+            raise RuntimeError("Агент уже не принимает дополнения. Отправьте сообщение новым запросом.")
+        self.command({"id": request_id, "type": "steer", "message": text})
+
+    def abort(self, request_id=None):
         if self.busy and not self._stopping:
+            self.command({"type": "abort", **({"id": request_id} if request_id else {})})
             self._stopping = True
-            self.command({"type": "abort"})
+            self._abort_request = request_id
             self._deadline.start(5000)
 
     def _set_busy(self, value):
@@ -424,8 +437,12 @@ class PiProcess(QObject):
             return
         for record in records:
             kind = record.get("type")
-            if kind == "response":
+            if kind == "response" and record.get("command") != "steer":
                 command = record.get("command")
+                if command == "abort" and self._abort_request and record.get("id") == self._abort_request:
+                    self._abort_request = None
+                    self._stopping = False
+                    self._deadline.stop()
                 if not record.get("success", False):
                     self._deadline.stop()
                     self._set_busy(False)
@@ -442,9 +459,10 @@ class PiProcess(QObject):
                 elif command == "prompt" and not self._stopping:
                     self._deadline.stop()
             elif kind == "agent_end":
-                self._deadline.stop()
+                if not self._abort_request:
+                    self._deadline.stop()
+                    self._stopping = False
                 self._set_busy(False)
-                self._stopping = False
             elif kind == "agent_start" and not self._stopping:
                 self._deadline.stop()
             self.received.emit(record)
@@ -476,6 +494,7 @@ class PiProcess(QObject):
     def shutdown(self):
         self._closing = True
         self._deadline.stop()
+        self._abort_request = None
         if self.process.state() != QProcess.ProcessState.NotRunning:
             if self.busy:
                 try:

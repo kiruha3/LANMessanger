@@ -34,6 +34,7 @@ class LocalAPI(BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append(request)
+        request_number = len(self.server.requests)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -48,11 +49,19 @@ class LocalAPI(BaseHTTPRequestHandler):
         else:
             delta = {"role": "assistant", "content": "Файл создан локальным агентом."}
             reason = "stop"
-        for value in ({"id": "local-test", "object": "chat.completion.chunk", "model": "test-model", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
-                      {"id": "local-test", "object": "chat.completion.chunk", "model": "test-model", "choices": [{"index": 0, "delta": {}, "finish_reason": reason}]}):
-            self.wfile.write(("data: " + json.dumps(value, ensure_ascii=False) + "\n\n").encode())
-        self.wfile.write(b"data: [DONE]\n\n")
-        self.wfile.flush()
+        try:
+            for index, choice in enumerate(({"index": 0, "delta": delta, "finish_reason": None},
+                                            {"index": 0, "delta": {}, "finish_reason": reason})):
+                value = {"id": "local-test", "object": "chat.completion.chunk", "model": "test-model", "choices": [choice]}
+                self.wfile.write(("data: " + json.dumps(value, ensure_ascii=False) + "\n\n").encode())
+                if index == 0 and hasattr(self.server, "after_delta"):
+                    self.wfile.flush()
+                    self.server.after_delta(request_number)
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            if not hasattr(self.server, "after_delta"):
+                raise
 
 
 class RealPiTests(unittest.TestCase):

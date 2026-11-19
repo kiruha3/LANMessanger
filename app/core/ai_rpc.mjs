@@ -10,6 +10,7 @@ process.env.PI_CODING_AGENT = "true";
 const sdk = await import(pathToFileURL(process.argv[2]).href);
 const { Type } = await import(pathToFileURL(require.resolve("typebox")).href);
 const imageAccounts = JSON.parse(process.env.LANMESSENGER_IMAGE_ACCOUNTS || "[]");
+const disabledTools = new Set(JSON.parse(process.env.LANMESSENGER_DISABLED_TOOLS || "[]"));
 const defaultImageAccount = imageAccounts.find(account => account.default);
 const generateImage = {
   name: "generate_image",
@@ -135,7 +136,10 @@ const createRuntime = async ({ cwd, agentDir, sessionManager, sessionStartEvent 
   if (!model) throw new Error("Модель не найдена в выбранном подключении. Обновите список моделей.");
   const created = await sdk.createAgentSessionFromServices({
     services, sessionManager, sessionStartEvent, model,
-    customTools: process.env.LANMESSENGER_IMAGE_ACCOUNTS ? [...chatTools, ...(imageAccounts.length ? [generateImage, listImageModels, imageStatus, cancelImage] : [])] : [],
+    customTools: process.env.LANMESSENGER_IMAGE_ACCOUNTS
+      ? [...chatTools, ...(imageAccounts.length ? [generateImage, listImageModels, imageStatus, cancelImage] : [])]
+        .filter(tool => !disabledTools.has(tool.name))
+      : [],
     thinkingLevel: options.get("--thinking"),
   });
   return { ...created, services, diagnostics: services.diagnostics };

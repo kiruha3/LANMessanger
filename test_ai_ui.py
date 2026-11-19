@@ -10,6 +10,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
+from PyQt6.QtTest import QTest
 from app.ui.ai_tab import AITab
 
 APP = QApplication.instance() or QApplication([])
@@ -26,6 +27,148 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_tool_switches_are_independent_and_survive_reopening(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                first_id = tab.current['id']
+                self.assertTrue(tab.plugin_checks['images'].isChecked())
+                tab.plugin_checks['images'].click()
+                self.assertFalse(tab.plugin_checks['images'].isChecked())
+                tab._new_chat()
+                self.assertTrue(tab.plugin_checks['images'].isChecked())
+                tab._open_ai_chat(first_id)
+                self.assertFalse(tab.plugin_checks['images'].isChecked())
+            finally:
+                tab.shutdown()
+                tab.close()
+            reopened = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertEqual(reopened.current['id'], first_id)
+                self.assertFalse(reopened.plugin_checks['images'].isChecked())
+                self.assertTrue(reopened.plugin_checks['chats'].isChecked())
+            finally:
+                reopened.shutdown()
+                reopened.close()
+
+    def test_active_agent_accepts_a_new_message_without_rewriting_history(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(1200, 640)
+            tab.show()
+            try:
+                APP.processEvents()
+                tab._begin_task('Первая задача')
+                tab.rpc.ready = True
+                tab.rpc._set_busy(True)
+                APP.processEvents()
+                self.assertTrue(tab.send_btn.isEnabled())
+                tab.input.setPlainText('А вот ещё условие')
+                with patch.object(tab.rpc, 'command') as command:
+                    QTest.mouseClick(tab.send_btn, Qt.MouseButton.LeftButton)
+                command.assert_not_called()
+                self.assertEqual([row['text'] for row in tab.current['messages']], ['Первая задача'])
+                request_id = next(iter(tab._run().followups))
+                queued = tab.output.rows.get(request_id)
+                self.assertIsNotNone(queued, 'Дополнение должно появиться сразу после клика')
+                self.assertIn('В очереди', queued.header.text())
+                with patch.object(tab.rpc, 'command') as command:
+                    tab._event({'type': 'turn_end'})
+                command.assert_not_called()
+                tab.input.setPlainText('Новый черновик')
+                tab.rpc._set_busy(False)
+                with patch.object(tab.rpc, 'command') as command:
+                    tab._event({'type': 'agent_end'})
+                self.assertEqual(command.call_args.args[0]['message'], 'А вот ещё условие')
+                self.assertEqual([row['text'] for row in tab.current['messages']], ['Первая задача', 'А вот ещё условие'])
+                self.assertIs(tab.output.rows[request_id], queued)
+                self.assertEqual(queued.header.text(), 'Вы')
+                self.assertEqual(tab.input.toPlainText(), 'Новый черновик')
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_followup_pill_sits_above_the_composer_without_moving_send_arrow(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(1200, 640)
+            tab.show()
+            try:
+                APP.processEvents()
+                self.assertFalse(tab.followup_actions.isVisible())
+                composer_geometry = tab.composer.geometry()
+                send_position = tab.send_btn.mapTo(tab, tab.send_btn.rect().center())
+                tab._begin_task('Первая задача')
+                tab.rpc.ready = True
+                tab.rpc._set_busy(True)
+                tab._event({'type': 'agent_start'})
+                APP.processEvents()
+                self.assertTrue(tab.followup_actions.isVisible())
+                self.assertIs(tab.followup_actions.parentWidget(), tab.composer.parentWidget())
+                pill_geometry = tab.followup_actions.geometry()
+                self.assertLess(pill_geometry.bottom(), composer_geometry.top())
+                self.assertEqual(pill_geometry.right(), composer_geometry.right())
+                self.assertLess(pill_geometry.width(), composer_geometry.width() / 2)
+                self.assertEqual(tab.composer.geometry(), composer_geometry)
+                self.assertTrue(tab.clarify_btn.isEnabled())
+                self.assertTrue(tab.queue_btn.isEnabled())
+                self.assertTrue(tab.stop_btn.isVisible())
+                self.assertIs(tab.childAt(send_position), tab.send_btn)
+                tab.rpc._set_busy(False)
+                tab._event({'type': 'agent_end'})
+                APP.processEvents()
+                self.assertFalse(tab.followup_actions.isVisible())
+                self.assertEqual(tab.composer.geometry(), composer_geometry)
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_rejected_queued_message_is_not_left_waiting(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab._begin_task('Первая задача')
+                tab.rpc.ready = True
+                tab.rpc._set_busy(True)
+                tab._event({'type': 'agent_start'})
+                tab.input.setPlainText('А вот ещё условие')
+                tab._event({'type': 'tool_execution_start', 'toolCallId': 'read-fixture', 'toolName': 'read'})
+                with patch.object(tab.rpc, 'command') as command:
+                    tab.clarify_btn.click()
+                self.assertEqual(command.call_args.args[0]['type'], 'steer')
+                request_id = command.call_args.args[0]['id']
+                self.assertIn(request_id, tab.output.rows)
+                self.assertIn('После инструмента', tab.output.rows[request_id].header.text())
+                tab._event({'type': 'response', 'command': 'steer', 'success': False, 'id': request_id})
+                self.assertNotIn(request_id, tab.output.rows)
+                self.assertEqual([row['text'] for row in tab.current['messages'] if row['role'] != 'tool'],
+                                 ['Первая задача', 'Дополнение не доставлено: А вот ещё условие'])
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_manual_stop_never_automatically_sends_waiting_messages(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab._begin_task('Первая задача')
+                tab.rpc.ready = True
+                tab.rpc._set_busy(True)
+                self.assertFalse(tab.clarify_btn.isEnabled())
+                tab.input.setPlainText('Сообщение на потом')
+                tab.queue_btn.click()
+                with patch.object(tab.rpc, 'command') as command:
+                    tab.stop_btn.click()
+                    tab.rpc._set_busy(False)
+                    tab._event({'type': 'agent_end'})
+                command.assert_called_once_with({'type': 'abort'})
+                self.assertEqual(tab.current['outcome'], 'stopped')
+                self.assertFalse(tab._run().followups)
+                self.assertEqual(tab.current['messages'][-1]['text'], 'Дополнение не доставлено: Сообщение на потом')
+            finally:
+                tab.shutdown()
+                tab.close()
+
     def test_pinned_chat_stays_above_newer_chats_and_pin_menu_and_restart_preserve_selection(self):
         from PyQt6.QtWidgets import QMenu
         with tempfile.TemporaryDirectory() as root:

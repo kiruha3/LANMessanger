@@ -98,7 +98,11 @@ class Timeline:
                 remainder = [row for row in self.messages if row["id"] not in owned]
                 remainder[start:start] = ordered
                 self.messages[:] = remainder
-            if message.get("errorMessage"):
+            if message.get("stopReason") == "aborted":
+                for row in ordered:
+                    if row["role"] in ("assistant", "thinking"):
+                        row["status"] = "stopped"
+            elif message.get("errorMessage"):
                 self._append("system", text=self.redact(message["errorMessage"]))
         elif kind == "tool_execution_start":
             message = self._tool(event.get("toolCallId"), event.get("toolName"), event.get("args", {}))
