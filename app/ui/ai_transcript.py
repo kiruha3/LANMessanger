@@ -157,6 +157,7 @@ class GeneratedImage(QWidget):
 class TranscriptRow(QFrame):
     expansion_changed = pyqtSignal()
     open_chat = pyqtSignal(str)
+    open_agent_message = pyqtSignal(str, str)
 
     def __init__(self, message, folder, parent=None, image_root=None):
         super().__init__(parent)
@@ -179,7 +180,7 @@ class TranscriptRow(QFrame):
             self.header.setStyleSheet(f"QToolButton {{ border: none; text-align: left; color: {colors['ts']}; padding: 3px; }}")
             self.header.toggled.connect(self._toggle)
             self.setStyleSheet(f"TranscriptRow {{ border: 1px solid {colors['in']}; border-radius: 6px; }}")
-        elif self.role == "image_activity":
+        elif self.role in ("image_activity", "agent_link"):
             self.header = QLabel()
             self.header.setWordWrap(True)
             self.header.setTextFormat(Qt.TextFormat.PlainText)
@@ -198,6 +199,20 @@ class TranscriptRow(QFrame):
             open_source = QPushButton("Открыть чат генерации")
             open_source.clicked.connect(lambda: self.open_chat.emit(message["job_chat_id"]))
             layout.addWidget(open_source, alignment=Qt.AlignmentFlag.AlignLeft)
+        if self.role == "agent_link":
+            self.agent_result_toggle = QToolButton()
+            self.agent_result_toggle.setText("Результат инструмента")
+            self.agent_result_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            self.agent_result_toggle.setCheckable(True)
+            self.agent_result_toggle.setArrowType(Qt.ArrowType.RightArrow)
+            self.agent_result = MessageBody(folder, parent=self)
+            self.agent_result.hide()
+            self.agent_result_toggle.toggled.connect(self._toggle_agent_result)
+            layout.addWidget(self.agent_result_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+            layout.addWidget(self.agent_result)
+            open_peer = QPushButton("К запросу" if message.get("incoming") else "Открыть ответный чат")
+            open_peer.clicked.connect(lambda: self.open_agent_message.emit(message["peer_chat"], message["peer_message"]))
+            layout.addWidget(open_peer, alignment=Qt.AlignmentFlag.AlignLeft)
         self.update_message(message)
 
     def _toggle(self, expanded):
@@ -205,6 +220,11 @@ class TranscriptRow(QFrame):
         self.expansion_changed.emit()
         self.body.setVisible(expanded)
         self.header.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    def _toggle_agent_result(self, expanded):
+        self.expansion_changed.emit()
+        self.agent_result.setVisible(expanded)
+        self.agent_result_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
 
     def update_message(self, message):
         snapshot = json.dumps(message, ensure_ascii=False, sort_keys=True)
@@ -215,6 +235,15 @@ class TranscriptRow(QFrame):
         if self.role == "image_activity":
             status = IMAGE_STATUS.get(message.get("status"), "Неизвестно")
             self.header.setText(f"Генерация изображений · {status}")
+        elif self.role == "agent_link":
+            title = "Вопрос от" if message.get("incoming") else "Запрос к"
+            status = {"waiting": "В работе" if message.get("incoming") else "Ждёт ответа",
+                      "timeout": "Время ожидания истекло"}.get(message["status"], STATUS.get(message["status"], ""))
+            self.header.setText(f"{title}: {message['peer_title']} · {status}")
+            result = message.get("result", "")
+            self.agent_result_toggle.setVisible(bool(result))
+            self.agent_result.set_content(result)
+            self.agent_result.setVisible(bool(result) and self.agent_result_toggle.isChecked())
         elif self.role == "user":
             status = message.get("status")
             label, tip = {
@@ -268,6 +297,7 @@ class TranscriptRow(QFrame):
 
 class AITranscript(QScrollArea):
     open_chat = pyqtSignal(str)
+    open_agent_message = pyqtSignal(str, str)
 
     def __init__(self, folder, parent=None):
         super().__init__(parent)
@@ -321,14 +351,14 @@ class AITranscript(QScrollArea):
             self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
     def set_messages(self, messages, scroll_to_end=True):
-        welcome_visible = not any(m.get("role") == "user" for m in messages)
+        welcome_visible = not any(m.get("role") in ("user", "agent_link") for m in messages)
         returning_to_welcome = welcome_visible and self.welcome.isHidden()
         self.welcome.setVisible(welcome_visible)
         if welcome_visible:
             self._follow_end = False
             if returning_to_welcome:
                 self.verticalScrollBar().setValue(0)
-        visible = [message for message in messages if message.get("role") in ("tool", "image_activity")
+        visible = [message for message in messages if message.get("role") in ("tool", "image_activity", "agent_link")
                    or message.get("text", "").strip() or message.get("images")]
         order = [message["id"] for message in visible]
         changed = order != self._order
@@ -344,6 +374,7 @@ class AITranscript(QScrollArea):
                 row = TranscriptRow(message, self.folder, image_root=self.image_root)
                 row.expansion_changed.connect(self._expanding)
                 row.open_chat.connect(self.open_chat.emit)
+                row.open_agent_message.connect(self.open_agent_message.emit)
                 self.rows[key] = row
             else:
                 changed = row.update_message(message) or changed
@@ -355,6 +386,13 @@ class AITranscript(QScrollArea):
             self.layout.activate()
             self._scroll_to_end()
             QTimer.singleShot(0, self._scroll_to_end)
+
+    def reveal_message(self, message_id):
+        row = self.rows.get(message_id)
+        if row:
+            self._follow_end = False
+            self.layout.activate()
+            self.ensureWidgetVisible(row, 0, 12)
 
     def toPlainText(self):
         return "\n\n".join(self.rows[key].body.toPlainText() for key in self._order)

@@ -1,4 +1,5 @@
 """AI tab smoke test with a real local fake RPC child, no external model calls."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -27,6 +28,173 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_agent_card_waits_until_click_finishes_to_open_collapsed_branch(self):
+        from PyQt6.QtWidgets import QPushButton
+
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(862, 552)
+            tab.show()
+            try:
+                source = tab.current
+                target = tab.store.new_chat(root)
+                target.update(delegated=True, parent_chat_id=source["id"])
+                tab.store.agent_links["route"] = {
+                    "id": "route", "source": source["id"], "target": target["id"],
+                    "question": "Проверка", "status": "completed",
+                }
+                tab._fill_chats()
+                tab._render()
+                branch = tab.chat_list.items[source["id"]]
+                branch.setExpanded(False)
+                button = next(button for button in tab.output.rows["route:out"].findChildren(QPushButton)
+                              if button.text() == "Открыть ответный чат")
+                tab.output.ensureWidgetVisible(button)
+                APP.processEvents()
+                during_click = []
+                button.clicked.connect(lambda: during_click.append(tab.current["id"]))
+                QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                self.assertEqual(during_click, [source["id"]])
+                wait_for(lambda: tab.current is target)
+                self.assertTrue(branch.isExpanded())
+                self.assertIs(tab.chat_list.currentItem(), tab.chat_list.items[target["id"]])
+                self.assertIn("route:in", tab.output.rows)
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_selecting_linked_chat_keeps_tree_columns_and_row_positions_stable(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(862, 478)
+            tab.show()
+            try:
+                unrelated = tab.current
+                source = tab.store.new_chat(root)
+                target = tab.store.new_chat(root)
+                target.update(delegated=True, parent_chat_id=source["id"])
+                tab.store.agent_links["route"] = {
+                    "id": "route", "source": source["id"], "target": target["id"],
+                    "question": "Проверка", "status": "completed",
+                }
+                tab._fill_chats()
+                APP.processEvents()
+                tree = tab.chat_list
+                items = [tree.topLevelItem(0), tree.items[source["id"]], tree.items[target["id"]]]
+
+                def positions():
+                    return [tree.visualRect(tree.indexFromItem(item, 0)).left() for item in items]
+
+                before = positions()
+                gutter = tree.columnViewportPosition(0)
+                for chat, linked in ((target, True), (unrelated, False), (source, True)):
+                    index = tree.indexFromItem(tree.items[chat["id"]], 0)
+                    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=tree.visualRect(index).center())
+                    APP.processEvents()
+                    self.assertIs(tab.current, chat)
+                    self.assertEqual(bool(tree.routes), linked)
+                    self.assertEqual(positions(), before)
+                    self.assertEqual(tree.columnViewportPosition(0), gutter)
+                self.assertLessEqual(gutter, 12)
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_agent_link_menu_focuses_overflow_without_moving_existing_chats(self):
+        from PyQt6.QtWidgets import QMenu
+
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(1100, 640)
+            tab.show()
+            try:
+                current = tab.current
+                others = [tab.store.new_chat(root) for _ in range(49)]
+                for index, chat in enumerate(others):
+                    chat["title"] = f"Исполнитель {index}"
+                for index, chat in enumerate(others[:4]):
+                    link_id = f"request-{index}"
+                    tab.store.agent_links[link_id] = {"id": link_id, "source": current["id"], "target": chat["id"],
+                                                     "question": "Проверка", "status": "completed"}
+                tab.store.agent_links["reverse"] = {"id": "reverse", "source": others[0]["id"], "target": current["id"],
+                                                    "question": "Встречный запрос", "status": "completed"}
+                tab._fill_chats()
+                tab._render()
+                self.assertEqual(len(tab.chat_list.items), 50)
+                self.assertEqual(tab.agent_links_btn.text(), "Связи: 5 · +2")
+                self.assertEqual(len(tab.chat_list.routes), 3)
+                QTest.mouseClick(tab.agent_links_btn, Qt.MouseButton.LeftButton)
+                menu = next(menu for menu in tab.findChildren(QMenu) if menu.isVisible())
+                action = next(action for action in menu.actions() if action.text() == "К: Исполнитель 0")
+                action.trigger()
+                menu.close()
+                wait_for(lambda: tab._focused_agent_link == "request-0")
+                self.assertEqual(tab._focused_agent_link, "request-0")
+                self.assertEqual(tab.chat_list.routes[0]["target"], others[0]["id"])
+                self.assertTrue(any(route["source"] == others[0]["id"] for route in tab.chat_list.routes))
+                self.assertIs(tab.current, current)
+            finally:
+                tab.shutdown()
+                tab.close()
+
+    def test_agent_links_preserve_nested_chats_directions_and_waiting_after_selection(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(1100, 640)
+            tab.show()
+            try:
+                tab.model.setEditText("test-model")
+                tab._save_connection()
+                parent = tab._run()
+                existing = tab.store.new_chat(root)
+                existing.update(title="Тесты", ai_selection=dict(parent.chat["ai_selection"]))
+
+                def ask(run, request_id, **params):
+                    tab._dispatch_run(run, tab._agent_request, {
+                        "title": "lanmessenger.ask_agent", "id": request_id,
+                        "placeholder": json.dumps({"question": "Проверь список", **params})})
+                    return run.agent_requests[request_id]
+
+                with patch.object(tab, "_start_text_run", side_effect=tab._begin_task):
+                    child = ask(parent, "first")
+                    grandchild = ask(child, "nested")
+                    peer = ask(child, "existing", chat_id=existing["id"])
+                child_id = child.chat["id"]
+                grandchild_id = grandchild.chat["id"]
+                tab._open_ai_chat(child_id)
+                APP.processEvents()
+                self.assertEqual(tab.chat_list.items[child_id].parent(), tab.chat_list.items[parent.chat["id"]])
+                self.assertEqual(tab.chat_list.items[grandchild_id].parent(), tab.chat_list.items[child_id])
+                self.assertIsNone(tab.chat_list.items[existing["id"]].parent().parent())
+                self.assertIn("Ждёт: 2", tab.chat_list.items[child_id].text(0))
+                self.assertIn("По запросу", tab.agent_link_status.text())
+                self.assertEqual(len(tab.chat_list.routes), 3)
+                self.assertTrue(all(route["waiting"] for route in tab.chat_list.routes))
+                outbound = next(link for link in tab.store.agent_links.values() if link["target"] == grandchild_id)
+                self.assertIn(outbound["id"] + ":out", tab.output.rows)
+                tab._open_agent_message(grandchild_id, outbound["id"] + ":in")
+                self.assertEqual(tab.current["id"], grandchild_id)
+                self.assertIn("Вопрос от", tab.output.rows[outbound["id"] + ":in"].header.text())
+                with patch.object(child.rpc, "command"):
+                    tab._dispatch_run(grandchild, tab._finish_text_run, "completed")
+                    tab._dispatch_run(peer, tab._finish_text_run, "failed")
+                self.assertEqual(outbound["status"], "completed")
+                tab._open_ai_chat(child_id)
+                self.assertNotIn("Ждёт", tab.agent_link_status.text())
+            finally:
+                tab.shutdown()
+                tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertEqual(restored.current["id"], child_id)
+                self.assertEqual(len(restored.store.agent_links), 3)
+                self.assertEqual({link["status"] for link in restored.store.agent_links.values()},
+                                 {"completed", "failed", "interrupted"})
+                self.assertIn(outbound["id"] + ":out", restored.output.rows)
+            finally:
+                restored.shutdown()
+                restored.close()
+
     def test_tool_switches_are_independent_and_survive_reopening(self):
         with tempfile.TemporaryDirectory() as root:
             tab = AITab(data_dir=root, work_dir=root)

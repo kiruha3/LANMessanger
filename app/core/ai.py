@@ -98,6 +98,7 @@ class AIStore:
         self.path = self.root / "state.json"
         self.config = default_config()
         self.chats = []
+        self.agent_links = {}
         self.profiles = []
         self.active_profile = "default"
         self.active_chat = ""
@@ -124,6 +125,18 @@ class AIStore:
                                 and message.get("status") in ("submitting", "queued", "processing")):
                             message["status"] = "interrupted"
                             message["text"] = message.get("model", "") + " · Последний статус не подтверждён после запуска."
+                chat_ids = {chat["id"] for chat in self.chats}
+                links = data.get("agent_links", [])
+                for link in links if isinstance(links, list) else []:
+                    if (isinstance(link, dict) and isinstance(link.get("id"), str)
+                            and isinstance(link.get("source"), str) and isinstance(link.get("target"), str)
+                            and link["source"] in chat_ids and link["target"] in chat_ids
+                            and link["source"] != link["target"]
+                            and link.get("status") in ("waiting", "completed", "failed", "timeout", "stopped", "interrupted")
+                            and isinstance(link.get("question"), str)):
+                        if link.get("status") == "waiting":
+                            link["status"] = "interrupted"
+                        self.agent_links[link["id"]] = link
                 self.profiles = data.get("profiles", [])
                 self.active_profile = data.get("active_profile", "default")
                 if not isinstance(self.profiles, list):
@@ -213,6 +226,7 @@ class AIStore:
                 profile["config"] = dict(self.config)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps({"config": self.config, "chats": self.chats, "profiles": self.profiles,
+                                         "agent_links": list(self.agent_links.values()),
                                          "active_profile": self.active_profile, "active_chat": self.active_chat}, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, self.path)
 

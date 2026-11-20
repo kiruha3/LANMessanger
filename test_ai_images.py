@@ -969,6 +969,18 @@ class ImageTests(unittest.TestCase):
                 self.assertEqual(child["model"], "worker-model")
                 self.assertEqual(child["outcome"], "completed")
                 child_id = child["id"]
+                links = list(tab.store.agent_links.values())
+                self.assertEqual([link["tool_id"] for link in links], ["ask_1", "ask_2"])
+                self.assertTrue(all(link["status"] == "completed" and link["target"] == child_id for link in links))
+                tab._open_ai_chat(child_id)
+                for link in links:
+                    self.assertIn("Вопрос от", tab.output.rows[link["id"] + ":in"].header.text())
+                self.assertNotIn("Вопрос агента из чата", tab.output.toPlainText())
+                tab._open_ai_chat(parent["id"])
+                self.assertEqual(len(tab.chat_list.routes), 1)
+                self.assertEqual(tab.chat_list.routes[0]["count"], 2)
+                self.assertFalse(tab.chat_list.routes[0]["waiting"])
+                self.assertTrue(all(link["id"] + ":out" in tab.output.rows for link in links))
             finally:
                 tab.shutdown(); tab.close()
                 server.shutdown(); server.server_close()
@@ -977,8 +989,136 @@ class ImageTests(unittest.TestCase):
                 child = next(chat for chat in restored.store.chats if chat["id"] == child_id)
                 self.assertEqual(sum(message.get("role") == "user" for message in child["messages"]), 2)
                 self.assertEqual(child["ai_selection"]["model"], "worker-model")
+                self.assertEqual(len(restored.store.agent_links), 2)
             finally:
                 restored.shutdown(); restored.close()
+
+    def test_real_pi_nested_agents_relay_answers_and_preserve_both_transcript_directions(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QPushButton
+        from test_ai_pi import LocalAPI
+
+        with tempfile.TemporaryDirectory() as root:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), LocalAPI)
+            server.requests = []
+            received = {}
+            release = threading.Event()
+            reached_leaf = threading.Event()
+            models = ("coordinator-model", "team-model", "worker-model")
+            questions = ("Проверь вывод команды", "Посчитай три плюс два")
+            leaf_reply = "Исполнитель: 3 + 2 = 5."
+            team_reply = "Руководитель: исполнитель подтвердил число 5."
+            final_reply = "Координатор: получил число 5 от команды."
+            replies = dict(zip(models, (final_reply, team_reply, leaf_reply)))
+
+            def plan(request, _number):
+                model = request["model"]
+                if model == models[2]:
+                    reached_leaf.set()
+                    release.wait(30)
+                    return None
+                tool = next((message for message in reversed(request["messages"]) if message["role"] == "tool"), None)
+                if tool:
+                    received[model] = tool["content"]
+                    return None
+                depth = models.index(model)
+                args = {"question": questions[depth], "model": models[depth + 1]}
+                return [{"index": 0, "id": f"nested_{depth}", "type": "function",
+                         "function": {"name": "ask_agent", "arguments": json.dumps(args)}}]
+
+            def click_chat(tab, chat):
+                item = tab.chat_list.items[chat["id"]]
+                tab.chat_list.scrollToItem(item)
+                APP.processEvents()
+                rect = tab.chat_list.visualRect(tab.chat_list.indexFromItem(item, 0))
+                QTest.mouseClick(tab.chat_list.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+                wait_for(lambda: tab.current is chat)
+                self.assertIs(tab.current, chat)
+
+            def click_card(tab, message_id, label):
+                button = next(button for button in tab.output.rows[message_id].findChildren(QPushButton)
+                              if button.text() == label)
+                tab.output.ensureWidgetVisible(button)
+                QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                APP.processEvents()
+
+            server.tool_plan = plan
+            server.reply_text = lambda request: replies[request["model"]]
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            tab = AITab(data_dir=root, work_dir=self.temp.name)
+            tab.resize(862, 552)
+            tab.show()
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+                tab.endpoint.setText(f"http://127.0.0.1:{server.server_port}/v1")
+                tab.model.setEditText(models[0])
+                tab.key.setText("nested-fixture-key")
+                coordinator = tab.current
+                tab.input.setPlainText("Запусти проверку цепочки агентов")
+                QTest.mouseClick(tab.send_btn, Qt.MouseButton.LeftButton)
+                wait_for(lambda: reached_leaf.is_set() and len(tab.store.agent_links) == 2, timeout=30)
+
+                first, second = tab.store.agent_links.values()
+                chats = {chat["id"]: chat for chat in tab.store.chats}
+                team, worker = chats[first["target"]], chats[second["target"]]
+                self.assertEqual(first["source"], coordinator["id"])
+                self.assertEqual(second["source"], team["id"])
+                for parent, child in ((coordinator, team), (team, worker)):
+                    self.assertEqual(child["parent_chat_id"], parent["id"])
+                    self.assertEqual(tab.chat_list.items[child["id"]].parent(), tab.chat_list.items[parent["id"]])
+                self.assertEqual([first["status"], second["status"]], ["waiting", "waiting"])
+                click_chat(tab, team)
+                self.assertEqual(len(tab.chat_list.routes), 2)
+                self.assertTrue(all(route["waiting"] for route in tab.chat_list.routes))
+                self.assertIn("По запросу", tab.agent_link_status.text())
+                self.assertIn("Ждёт ответ от", tab.agent_link_status.text())
+                self.assertEqual(tab.output.rows[first["id"] + ":in"].body.toPlainText(), questions[0])
+                team_item = tab.chat_list.items[team["id"]]
+                worker_index = tab.chat_list.indexFromItem(tab.chat_list.items[worker["id"]], 0)
+                team_item.setExpanded(False)
+                APP.processEvents()
+                self.assertFalse(tab.chat_list.visualRect(worker_index).isValid())
+                click_card(tab, second["id"] + ":out", "Открыть ответный чат")
+                self.assertIs(tab.current, worker)
+                self.assertTrue(team_item.isExpanded())
+                self.assertEqual(tab.output.rows[second["id"] + ":in"].body.toPlainText(), questions[1])
+                click_card(tab, second["id"] + ":in", "К запросу")
+                self.assertIs(tab.current, team)
+
+                release.set()
+                wait_for(lambda: coordinator.get("outcome") == "completed", timeout=25)
+                self.assertEqual(json.loads(received[models[1]])["answer"], leaf_reply)
+                self.assertEqual(json.loads(received[models[0]])["answer"], team_reply)
+                self.assertEqual([first["status"], second["status"]], ["completed", "completed"])
+                self.assertTrue(all(not route["waiting"] for route in tab.chat_list.routes))
+                self.assertFalse(tab.agent_link_status.isVisible())
+                self.assertIn(team_reply, tab.output.toPlainText())
+                calls = len(server.requests)
+            finally:
+                release.set()
+                tab.shutdown()
+                tab.close()
+                server.shutdown()
+                server.server_close()
+
+            reopened = AITab(data_dir=root, work_dir=self.temp.name)
+            reopened.resize(862, 552)
+            reopened.show()
+            try:
+                self.assertEqual(reopened.current["id"], team["id"])
+                self.assertEqual(len(reopened.chat_list.routes), 2)
+                click_card(reopened, first["id"] + ":in", "К запросу")
+                self.assertEqual(reopened.current["id"], coordinator["id"])
+                self.assertIn(final_reply, reopened.output.toPlainText())
+                click_card(reopened, first["id"] + ":out", "Открыть ответный чат")
+                click_card(reopened, second["id"] + ":out", "Открыть ответный чат")
+                self.assertEqual(reopened.current["id"], worker["id"])
+                self.assertIn(leaf_reply, reopened.output.toPlainText())
+                self.assertEqual(len(server.requests), calls)
+            finally:
+                reopened.shutdown()
+                reopened.close()
 
     def test_agent_questions_reject_busy_self_draft_image_accounts_and_excessive_depth(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1006,6 +1146,7 @@ class ImageTests(unittest.TestCase):
                     tab._agent_request({"title": "lanmessenger.ask_agent", "id": "deep", "placeholder": '{"question":"test"}'})
                     self.assertIn("уровней", json.loads(reply.call_args.args[0]["value"])["error"])
                 self.assertEqual(parent.agent_requests, {})
+                self.assertEqual(tab.store.agent_links, {})
             finally:
                 tab.shutdown(); tab.close()
 
@@ -1033,6 +1174,7 @@ class ImageTests(unittest.TestCase):
                     self.assertEqual(child.chat["outcome"], "stopped")
                     self.assertIsNone(child.agent_parent_request)
                     self.assertEqual(parent.agent_requests, {})
+                    self.assertEqual([link["status"] for link in tab.store.agent_links.values()], ["timeout", "stopped"])
             finally:
                 tab.shutdown(); tab.close()
 

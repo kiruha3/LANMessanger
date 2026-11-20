@@ -13,7 +13,7 @@ from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QImage, QPainte
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QDialog, QDialogButtonBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QInputDialog, QMenu, QProgressBar, QScrollArea, QSplitter, QStyle, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QInputDialog, QMenu, QProgressBar, QScrollArea, QSplitter, QStyle, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINKING_LEVELS, RESPONSE_STYLES,
@@ -27,6 +27,7 @@ from ..core.ai_images import (CLOUDFLARE_MODEL, HORDE_MODEL, HORDE_URL, IMAGE_PR
                               image_bytes, image_content, wait_for_image_cancellations)
 from ..core.ai_installer import RuntimeInstaller, runtime_environment, supported
 from .ai_transcript import AITranscript
+from .ai_chat_tree import AIChatTree
 from .ai_instructions import InstructionsDialog
 from .ai_plugins import panel_title
 from .switch import Switch
@@ -273,6 +274,11 @@ class AITab(QWidget):
         super().__init__(parent)
         self._event_run = None
         self._runs = {}
+        self._focused_agent_link = None
+        self._pending_chat_selection = None
+        self._chat_selection_timer = QTimer(self)
+        self._chat_selection_timer.setSingleShot(True)
+        self._chat_selection_timer.timeout.connect(self._apply_tree_chat_selection)
         self._selected_run = self._make_run(None)
         self.work_dir = str(Path(work_dir or application_folder()).resolve())
         self.store = None
@@ -332,7 +338,7 @@ class AITab(QWidget):
         self.image_resume_btn = QPushButton("Получить результат генерации")
         self.image_resume_btn.clicked.connect(self._resume_image)
         self.image_resume_btn.hide()
-        self.chat_list = QTreeWidget()
+        self.chat_list = AIChatTree()
         self.chat_list.setHeaderHidden(True)
         self.chat_list.setIndentation(16)
         self.chat_list.setIconSize(QSize(28, 16))
@@ -352,6 +358,15 @@ class AITab(QWidget):
         left_layout.addWidget(self.new_btn)
         left_layout.addWidget(self.project_btn)
         left_layout.addWidget(self.chat_list, 1)
+        self.agent_links_btn = QPushButton()
+        self.agent_links_btn.clicked.connect(self._agent_links_menu)
+        self.agent_links_btn.hide()
+        left_layout.addWidget(self.agent_links_btn)
+        self.agent_links_legend = QLabel("Пунктир — запрос ждёт ответа")
+        self.agent_links_legend.setStyleSheet(f"color: {theme.bubbles()['ts']};")
+        self.agent_links_legend.setWordWrap(True)
+        self.agent_links_legend.hide()
+        left_layout.addWidget(self.agent_links_legend)
 
         self.connection_btn = QPushButton()
         self.connection_btn.setIcon(settings_icon())
@@ -626,6 +641,11 @@ class AITab(QWidget):
         self.chat_title = panel_title("")
         self.chat_title.setTextFormat(Qt.TextFormat.PlainText)
         right_layout.addWidget(self.chat_title)
+        self.agent_link_status = QLabel()
+        self.agent_link_status.setWordWrap(True)
+        self.agent_link_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.agent_link_status.hide()
+        right_layout.addWidget(self.agent_link_status)
         right_layout.addWidget(self.status)
         right_layout.addWidget(self.error_settings_btn, 0, Qt.AlignmentFlag.AlignLeft)
         right_layout.addWidget(self.image_resume_btn, 0, Qt.AlignmentFlag.AlignLeft)
@@ -642,6 +662,7 @@ class AITab(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([170, 650, 240])
         self.output.open_chat.connect(self._open_ai_chat)
+        self.output.open_agent_message.connect(self._open_agent_message, Qt.ConnectionType.QueuedConnection)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
@@ -752,6 +773,103 @@ class AITab(QWidget):
             index = next((index for index, chat in enumerate(self.store.chats) if chat['id'] == chat_id), None)
             if index is not None and self.current is not self.store.chats[index]:
                 self._select_chat(index)
+
+    def _open_agent_message(self, chat_id, message_id):
+        if self._closed:
+            return
+        previous_chat = self._current
+        self._focused_agent_link = message_id.rsplit(":", 1)[0]
+        self._open_ai_chat(chat_id)
+        if self._current and self._current["id"] == chat_id:
+            if self._current is previous_chat:
+                self._refresh_agent_links(reveal=True)
+            item = self.chat_list.items.get(chat_id)
+            if item:
+                self.chat_list.scrollToItem(item)
+            self.output.reveal_message(message_id)
+
+    def _agent_link_activity(self):
+        titles = {chat["id"]: chat["title"] for chat in self.store.chats}
+        waiting, working = {}, {}
+        for link in self.store.agent_links.values():
+            if link["status"] == "waiting":
+                waiting.setdefault(link["source"], []).append(titles.get(link["target"], "ИИ-чат"))
+                working.setdefault(link["target"], []).append(titles.get(link["source"], "ИИ-чат"))
+        return waiting, working
+
+    def _selected_agent_link_groups(self):
+        if not self._current:
+            return []
+        chat_id = self._current["id"]
+        groups = {}
+        for link in reversed(tuple(self.store.agent_links.values())):
+            pair = (link["source"], link["target"])
+            if chat_id in pair and all(key in self.chat_list.items for key in pair):
+                groups.setdefault(pair, []).append(link)
+        return sorted(groups.values(), key=lambda links: (
+            any(link["id"] == self._focused_agent_link for link in links),
+            any(link["status"] == "waiting" for link in links)), reverse=True)
+
+    def _expand_chat_item(self, item):
+        item = item.parent()
+        while item:
+            item.setExpanded(True)
+            item = item.parent()
+
+    def _refresh_agent_links(self, reveal=False):
+        groups = self._selected_agent_link_groups()
+        routes = []
+        for links in groups[:3]:
+            link = links[0]
+            focused = any(entry["id"] == self._focused_agent_link for entry in links)
+            if reveal:
+                for key in ("source", "target"):
+                    self._expand_chat_item(self.chat_list.items[link[key]])
+            routes.append({"source": link["source"], "target": link["target"], "count": len(links),
+                           "waiting": any(entry["status"] == "waiting" for entry in links),
+                           "focused": focused or not routes})
+        self.chat_list.set_routes(routes)
+        overflow = len(groups) - len(routes)
+        self.agent_links_btn.setText(f"Связи: {len(groups)}" + (f" · +{overflow}" if overflow else ""))
+        self.agent_links_btn.setVisible(bool(groups))
+        self.agent_links_legend.setVisible(any(route["waiting"] for route in routes))
+        waiting, working = self._agent_link_activity()
+        chat_id = self._current["id"] if self._current else ""
+        descriptions = []
+        if chat_id in working:
+            descriptions.append("По запросу: " + ", ".join(dict.fromkeys(working[chat_id])))
+        if chat_id in waiting:
+            descriptions.append("Ждёт ответ от: " + ", ".join(dict.fromkeys(waiting[chat_id])))
+        self.agent_link_status.setText("\n".join(descriptions))
+        self.agent_link_status.setVisible(bool(descriptions))
+
+    def _agent_links_menu(self):
+        groups = self._selected_agent_link_groups()
+        if not groups:
+            return
+        chat_id = self._current["id"]
+        titles = {chat["id"]: chat["title"] for chat in self.store.chats}
+        menu = QMenu(self)
+        for links in groups:
+            first = links[0]
+            incoming = first["target"] == chat_id
+            suffix = ":in" if incoming else ":out"
+            prefix = "От: " if incoming else "К: "
+            title = titles[first["source"] if incoming else first["target"]]
+            if len(links) > 1:
+                group = menu.addMenu(f"{prefix}{title} ×{len(links)}")
+                for link in links:
+                    action = group.addAction(link.get("question", "").replace("\n", " ")[:70] or "Запрос")
+                    action.triggered.connect(lambda _checked=False, link=link, suffix=suffix:
+                                             self._open_agent_message(chat_id, link["id"] + suffix),
+                                             Qt.ConnectionType.QueuedConnection)
+            else:
+                action = menu.addAction(prefix + title)
+                action.triggered.connect(lambda _checked=False, link=first, suffix=suffix:
+                                         self._open_agent_message(chat_id, link["id"] + suffix),
+                                         Qt.ConnectionType.QueuedConnection)
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(self.agent_links_btn.mapToGlobal(self.agent_links_btn.rect().bottomLeft()))
 
     def _sync_chat_tools(self):
         disabled = disabled_plugins(self.current or {})
@@ -989,40 +1107,66 @@ class AITab(QWidget):
         self.install_btn.setEnabled(supported())
 
     def _fill_chats(self):
-        expanded = {self.chat_list.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
-                    for i in range(self.chat_list.topLevelItemCount()) if self.chat_list.topLevelItem(i).isExpanded()}
-        first_fill = self.chat_list.topLevelItemCount() == 0
+        expanded = {item.data(0, Qt.ItemDataRole.UserRole): item.isExpanded()
+                    for item in [*self.chat_list.items.values(), *(
+                        self.chat_list.topLevelItem(index) for index in range(self.chat_list.topLevelItemCount()))]
+                    if item.childCount()}
         self.chat_list.blockSignals(True)
+        self.chat_list.set_routes([])
+        self.chat_list.items.clear()
         self.chat_list.clear()
-        selected_id = self._current["id"] if self._current else ""
+        selected_id = self._current["id"] if self._current else self.store.active_chat
         projects = {}
+        counts = {}
+        folder_paths = {chat["id"]: str(Path(chat["folder"]).resolve()) for chat in self.store.chats}
+        folder_keys = {chat_id: os.path.normcase(path) for chat_id, path in folder_paths.items()}
+        ordered = sorted(self.store.chats, key=lambda chat: chat.get("last_activity", 0), reverse=True)
         projects_in_order = {key: rank for rank, key in enumerate(dict.fromkeys(
-            os.path.normcase(str(Path(chat["folder"]).resolve()))
-            for chat in sorted(self.store.chats, key=lambda chat: chat.get("last_activity", 0), reverse=True)))}
-        for chat in sorted(self.store.chats, key=lambda chat: (
-                -projects_in_order[os.path.normcase(str(Path(chat["folder"]).resolve()))],
-                bool(chat.get("pinned")), chat.get("last_activity", 0)), reverse=True):
-            path = str(Path(chat["folder"]).resolve())
-            key = os.path.normcase(path)
+            folder_keys[chat["id"]] for chat in ordered))}
+        parents = {chat["id"]: chat["parent_chat_id"] for chat in ordered
+                   if chat.get("delegated") and chat.get("parent_chat_id") in folder_keys
+                   and folder_keys[chat["parent_chat_id"]] == folder_keys[chat["id"]]}
+        for chat_id in tuple(parents):
+            ancestor, seen = chat_id, set()
+            while ancestor in parents:
+                if ancestor in seen:
+                    del parents[chat_id]
+                    break
+                seen.add(ancestor)
+                ancestor = parents[ancestor]
+        ordered = sorted(ordered, key=lambda chat: (
+                -projects_in_order[folder_keys[chat["id"]]],
+                bool(chat.get("pinned")), chat.get("last_activity", 0)), reverse=True)
+        waiting, working = self._agent_link_activity()
+        for chat in ordered:
+            chat_id = chat["id"]
+            key = folder_keys[chat_id]
             if key not in projects:
                 project = QTreeWidgetItem(self.chat_list)
                 project.setData(0, Qt.ItemDataRole.UserRole, key)
-                project.setToolTip(0, path)
+                project.setToolTip(0, folder_paths[chat_id])
                 project.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon))
-                project.setExpanded(first_fill or key in expanded)
                 projects[key] = project
-            project = projects[key]
-            item = QTreeWidgetItem(project)
-            item.setData(0, Qt.ItemDataRole.UserRole, chat["id"])
-            self._style_chat_item(item, chat)
-            if chat["id"] == selected_id:
-                self.chat_list.setCurrentItem(item)
-            if chat["id"] == self.store.active_chat:
-                self.chat_list.setCurrentItem(item)
-        for project in projects.values():
+            item = QTreeWidgetItem()
+            item.setData(0, Qt.ItemDataRole.UserRole, chat_id)
+            self._style_chat_item(item, chat, waiting.get(chat_id, []), working.get(chat_id, []))
+            self.chat_list.items[chat_id] = item
+            counts[key] = counts.get(key, 0) + 1
+        for chat in ordered:
+            chat_id = chat["id"]
+            parent = self.chat_list.items.get(parents.get(chat_id), projects[folder_keys[chat_id]])
+            parent.addChild(self.chat_list.items[chat_id])
+        for key, project in projects.items():
             folder = Path(project.toolTip(0))
-            project.setText(0, f"{folder.name or str(folder)} ({project.childCount()})")
+            project.setText(0, f"{folder.name or str(folder)} ({counts[key]})")
+            project.setExpanded(expanded.get(key, True))
+        for chat_id, item in self.chat_list.items.items():
+            if item.childCount():
+                item.setExpanded(expanded.get(chat_id, True))
+        if selected_id in self.chat_list.items:
+            self.chat_list.setCurrentItem(self.chat_list.items[selected_id])
         self.chat_list.blockSignals(False)
+        self._refresh_agent_links()
         self._sync_chat_pulse()
 
     def _chat_status_icon(self, state, pinned=False):
@@ -1053,12 +1197,17 @@ class AITab(QWidget):
             self._chat_status_icons[key] = QIcon(pixmap)
         return self._chat_status_icons[key]
 
-    def _style_chat_item(self, item, chat):
+    def _style_chat_item(self, item, chat, waiting=(), working=()):
         state = ("running" if chat.get("running") else
                  "failed" if chat.get("unread_result") and chat.get("result_status", chat.get("outcome")) == "failed" else
                  "ready" if chat.get("unread_result") else "idle")
         status = {"running": "работает", "ready": "готово", "failed": "ошибка", "idle": ""}[state]
-        item.setText(0, chat["title"] + (" · " + status if status else ""))
+        if waiting:
+            status = f"Ждёт: {len(waiting)}"
+        elif working:
+            status = "Работает"
+        item.setText(0, f"{status} · {chat['title']}" if waiting or working else
+                     chat["title"] + (" · " + status if status else ""))
         item.setData(0, Qt.ItemDataRole.UserRole + 1, state)
         item.setIcon(0, self._chat_status_icon(state, bool(chat.get("pinned"))))
         dark = theme.current() == "dark"
@@ -1070,8 +1219,14 @@ class AITab(QWidget):
         font = item.font(0)
         font.setBold(state in ("ready", "failed"))
         item.setFont(0, font)
-        item.setToolTip(0, chat["title"] + ("\nЗакреплён" if chat.get("pinned") else "") + "\n" +
-                       (status.capitalize() if status else "Нет новых результатов") + "\n" + chat["folder"])
+        details = [chat["title"], status.capitalize() if status else "Нет новых результатов", chat["folder"]]
+        if chat.get("pinned"):
+            details.append("Закреплён")
+        if working:
+            details.append("По запросу: " + ", ".join(working))
+        if waiting:
+            details.append("Ждёт ответ от: " + ", ".join(waiting))
+        item.setToolTip(0, "\n".join(details))
 
     def _sync_chat_pulse(self):
         if not self._closed and any(chat.get("running") for chat in self.store.chats):
@@ -1082,14 +1237,10 @@ class AITab(QWidget):
 
     def _pulse_running_chats(self):
         self._chat_pulse = not self._chat_pulse
-        for i in range(self.chat_list.topLevelItemCount()):
-            group = self.chat_list.topLevelItem(i)
-            for j in range(group.childCount()):
-                item = group.child(j)
-                if item.data(0, Qt.ItemDataRole.UserRole + 1) == "running":
-                    chat_id = item.data(0, Qt.ItemDataRole.UserRole)
-                    chat = next((chat for chat in self.store.chats if chat["id"] == chat_id), {})
-                    item.setIcon(0, self._chat_status_icon("running", bool(chat.get("pinned"))))
+        for chat in self.store.chats:
+            item = self.chat_list.items.get(chat["id"])
+            if item and item.data(0, Qt.ItemDataRole.UserRole + 1) == "running":
+                item.setIcon(0, self._chat_status_icon("running", bool(chat.get("pinned"))))
 
     def _chat_context_menu(self, point):
         item = self.chat_list.itemAt(point)
@@ -1119,25 +1270,30 @@ class AITab(QWidget):
         self._fill_chats()
 
     def _update_chat_item(self, chat):
-        for i in range(self.chat_list.topLevelItemCount()):
-            group = self.chat_list.topLevelItem(i)
-            for j in range(group.childCount()):
-                item = group.child(j)
-                if item.data(0, Qt.ItemDataRole.UserRole) == chat["id"]:
-                    self._style_chat_item(item, chat)
+        item = self.chat_list.items.get(chat["id"])
+        if item:
+            waiting, working = self._agent_link_activity()
+            self._style_chat_item(item, chat, waiting.get(chat["id"], []), working.get(chat["id"], []))
         self._sync_chat_pulse()
 
     def _tree_chat_changed(self, item, _previous):
         if item is None:
             return
-        if item.parent() is None:
-            item.setExpanded(True)
-            if item.childCount():
-                self.chat_list.setCurrentItem(item.child(0))
-            return
-        chat_id = item.data(0, Qt.ItemDataRole.UserRole)
-        index = next((i for i, chat in enumerate(self.store.chats) if chat["id"] == chat_id), -1)
-        self._select_chat(index)
+        if item.parent() is None and item.childCount():
+            item = item.child(0)
+        self._pending_chat_selection = item.data(0, Qt.ItemDataRole.UserRole)
+        self._chat_selection_timer.start(0)
+
+    def _apply_tree_chat_selection(self):
+        chat_id, self._pending_chat_selection = self._pending_chat_selection, None
+        if chat_id and not self._closed:
+            self._open_ai_chat(chat_id)
+            item = self.chat_list.items.get(chat_id)
+            if item and self._current and self._current["id"] == chat_id and self.chat_list.currentItem() is not item:
+                blocked = self.chat_list.blockSignals(True)
+                self._expand_chat_item(item)
+                self.chat_list.setCurrentItem(item)
+                self.chat_list.blockSignals(blocked)
 
     def _choose_folder(self):
         if not self.store or self._task_busy() or self._pending or self._installing or self._logging_in:
@@ -1176,6 +1332,8 @@ class AITab(QWidget):
         if (not self.store or not 0 <= index < len(self.store.chats) or self._installing
                 or self._logging_in):
             return
+        self._chat_selection_timer.stop()
+        self._pending_chat_selection = None
         self._save_timer.stop()
         self._render_timer.stop()
         if self.current:
@@ -1199,14 +1357,12 @@ class AITab(QWidget):
         self.folder_label.setAccessibleName(f"Рабочая папка: {self.work_dir}")
         self.workspace_path.setText(self.work_dir)
         self.output.folder = self.work_dir
+        self._refresh_agent_links(reveal=True)
         self.chat_list.blockSignals(True)
-        for group_index in range(self.chat_list.topLevelItemCount()):
-            group = self.chat_list.topLevelItem(group_index)
-            for child_index in range(group.childCount()):
-                child = group.child(child_index)
-                if child.data(0, Qt.ItemDataRole.UserRole) == self.current["id"]:
-                    group.setExpanded(True)
-                    self.chat_list.setCurrentItem(child)
+        item = self.chat_list.items.get(self.current["id"])
+        if item:
+            self._expand_chat_item(item)
+            self.chat_list.setCurrentItem(item)
         self.chat_list.blockSignals(False)
         if not self.timeline or not self._task_busy():
             self.timeline = Timeline(self.current["messages"], self.rpc.redact)
@@ -1590,10 +1746,12 @@ class AITab(QWidget):
             self.status.hide()
             self.error_settings_btn.hide()
         attachments = [] if followup_id else self._run().sent_images
-        if self._run().agent_parent_request and not followup_id:
-            self._run().agent_parent_request["start"] = len(self.current["messages"])
+        request = self._run().agent_parent_request if not followup_id else None
+        if request:
+            request["start"] = len(self.current["messages"])
+        message_id = request["link_id"] + ":in" if request else followup_id
         self.current["messages"].append({"role": "user", "text": self.rpc.redact(text) if followup_id else text,
-                                         **({"id": followup_id} if followup_id else {}),
+                                         **({"id": message_id} if message_id else {}),
                                          **({"images": list(attachments), "attachment_message": True} if attachments else {}),
                                          **({"image_message": True} if image else {})})
         self.timeline = Timeline(self.current["messages"], self.rpc.redact)
@@ -2316,16 +2474,20 @@ class AITab(QWidget):
                     self.thinking_status.setText(text)
         if kind == "response" and event.get("command") == "get_messages" and event.get("success"):
             restored = restore_messages(event.get("data", {}).get("messages", []), self.rpc.redact)
-            attachments = [m for m in messages if m.get("attachment_message")]
-            for message in restored:
-                original = next((m for m in attachments if m.get("role") == message.get("role")
-                                 and m.get("text") == message.get("text")), None)
-                if original:
-                    message.update(images=original["images"], attachment_message=True)
-                    attachments.remove(original)
-            lost_context = bool(messages) and not restored
             archived = self.current.get("archived_messages", [])
             archived_ids = {m.get("id") for m in archived}
+            local_messages = [m for m in messages if m.get("id") not in archived_ids and (
+                m.get("attachment_message") or (m.get("role") == "user" and m.get("id", "").endswith(":in")))]
+            for message in restored:
+                original = next((m for m in local_messages if m.get("role") == message.get("role")
+                                 and m.get("text") == message.get("text")), None)
+                if original:
+                    if original.get("attachment_message"):
+                        message.update(images=original["images"], attachment_message=True)
+                    if original.get("id", "").endswith(":in"):
+                        message["id"] = original["id"]
+                    local_messages.remove(original)
+            lost_context = bool(messages) and not restored
             local_images = [m for m in messages if (m.get("image_message") or m.get("role") == "image_activity")
                             and m.get("id") not in archived_ids]
             if restored and local_images:
@@ -2415,7 +2577,16 @@ class AITab(QWidget):
             if request:
                 request["timer"].stop()
                 request["timer"].deleteLater()
+                self._update_agent_link_outcome(request, "stopped")
                 self._dispatch_run(child, self._stop)
+
+    def _update_agent_link_outcome(self, request, outcome):
+        link = self.store.agent_links[request["link_id"]]
+        link["status"] = outcome
+        if not self._closed:
+            self._fill_chats()
+            self._dispatch_run(self._selected_run, self._render)
+        self._save()
 
     def _agent_request(self, event):
         try:
@@ -2499,14 +2670,20 @@ class AITab(QWidget):
                 child.image_connections = self._dispatch_run(child, self._image_connections)
                 timer = QTimer(self)
                 timer.setSingleShot(True)
+                link_id = str(uuid.uuid4())
+                self.store.agent_links[link_id] = {"id": link_id, "source": parent.chat["id"],
+                                                  "target": chat["id"], "status": "waiting",
+                                                  "question": self.rpc.redact(question.strip()),
+                                                  "tool_id": params.get("tool_call_id")}
                 child.agent_parent_request = {"run": parent, "id": event["id"], "timer": timer,
-                                              "start": len(chat["messages"])}
+                                              "start": len(chat["messages"]), "link_id": link_id}
                 parent.agent_requests[event["id"]] = child
                 timer.timeout.connect(lambda: self._dispatch_run(child, self._agent_timeout))
                 timer.start(timeout * 1000)
                 chat.update(running=True, interrupted=False)
                 self._fill_chats()
                 self._save()
+                self._dispatch_run(self._selected_run, self._render)
                 self._set_activity("Ожидает ответ из чата «" + chat["title"] + "»…", True)
                 try:
                     self._dispatch_run(child, self._start_text_run,
@@ -2532,6 +2709,7 @@ class AITab(QWidget):
         request["timer"].deleteLater()
         parent = request["run"]
         parent.agent_requests.pop(request["id"], None)
+        self._update_agent_link_outcome(request, outcome)
         if self._closed or parent.stopped:
             return
         result = {"chat_id": self.current["id"], "model": child.config["model"], "status": outcome}
@@ -2598,7 +2776,33 @@ class AITab(QWidget):
         if run.redirect:
             pending.append((*run.redirect, "redirecting"))
         pending.extend((request_id, text, "queued") for request_id, text in run.followups.items())
-        self.output.set_messages(self.current["messages"] + [
+        chat_id = self.current["id"]
+        titles = {chat["id"]: chat["title"] for chat in self.store.chats}
+        linked = {}
+        tools = {}
+        for link in self.store.agent_links.values():
+            incoming = link["target"] == chat_id
+            if not incoming and link["source"] != chat_id:
+                continue
+            other = link["source"] if incoming else link["target"]
+            message_id = link["id"] + (":in" if incoming else ":out")
+            linked[message_id] = {"id": message_id, "role": "agent_link", "text": link["question"],
+                                  "status": link["status"], "incoming": incoming, "peer_chat": other,
+                                  "peer_title": titles.get(other, "ИИ-чат"),
+                                  "peer_message": link["id"] + (":out" if incoming else ":in")}
+            if not incoming and isinstance(link.get("tool_id"), str):
+                tools[link["tool_id"]] = message_id
+        messages = []
+        for message in self.current["messages"]:
+            message_id = tools.get(message.get("tool_id")) if message.get("role") == "tool" else message["id"]
+            card = linked.pop(message_id, None)
+            if card is None:
+                messages.append(message)
+            else:
+                if message.get("result"):
+                    card["result"] = message["result"]
+                messages.append(card)
+        self.output.set_messages(messages + list(linked.values()) + [
             {"id": request_id, "role": "user", "text": self.rpc.redact(text), "status": status}
             for request_id, text, status in pending])
 
@@ -2837,6 +3041,7 @@ class AITab(QWidget):
         if self._closed:
             return
         self._connection_save_timer.stop()
+        self._chat_selection_timer.stop()
         self._chat_pulse_timer.stop()
         self._persist_connection()
         self._closed = True
@@ -2858,6 +3063,7 @@ class AITab(QWidget):
                 if request:
                     request["timer"].stop()
                     request["timer"].deleteLater()
+                    self.store.agent_links[request["link_id"]]["status"] = "interrupted"
             run.agent_requests = {}
             self._dispatch_run(run, self._cancel_image_catalogs)
             run.images.cancel(job=run.chat.get("image_job") if run.chat else None)

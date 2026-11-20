@@ -47,7 +47,8 @@ class LocalAPI(BaseHTTPRequestHandler):
                      "function": {"name": getattr(self.server, 'tool_name', 'write'), "arguments": json.dumps(getattr(self.server, 'tool_arguments', {"path": "agent-proof.txt", "content": "created by real Pi"}))}}])}
             reason = "tool_calls"
         else:
-            delta = {"role": "assistant", "content": "Файл создан локальным агентом."}
+            reply = self.server.reply_text(request) if hasattr(self.server, "reply_text") else "Файл создан локальным агентом."
+            delta = {"role": "assistant", "content": reply}
             reason = "stop"
         try:
             for index, choice in enumerate(({"index": 0, "delta": delta, "finish_reason": None},
