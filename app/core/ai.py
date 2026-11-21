@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
@@ -220,6 +221,35 @@ class AIStore:
         self.save()
         return chat
 
+    def rename_chat(self, chat_id, title):
+        chat = next((c for c in self.chats if c["id"] == chat_id), None)
+        if chat is None:
+            raise ValueError("ИИ-чат не найден.")
+        if not isinstance(title, str) or any(unicodedata.category(char) in ("Cc", "Cs", "Zl", "Zp") for char in title):
+            raise ValueError("Название должно быть одной строкой без управляющих символов.")
+        title = title.strip()
+        if not 1 <= len(title) <= 80:
+            raise ValueError("Название должно содержать от 1 до 80 символов.")
+        previous = {key: chat[key] for key in ("title", "title_custom") if key in chat}
+        chat.update(title=title, title_custom=True)
+        try:
+            self.save()
+        except OSError:
+            chat.pop("title_custom", None)
+            chat.update(previous)
+            raise ValueError("Не удалось сохранить название чата.") from None
+        return chat
+
+    def rename_agent_chat(self, caller, chat_id, title):
+        # Ownership follows stored delegation, not the most recent ask_agent link.
+        if caller is None or not any(chat is caller for chat in self.chats):
+            raise ValueError("Вызывающий ИИ-чат не определён.")
+        target = next((chat for chat in self.chats if chat["id"] == chat_id), None)
+        if target is None or (target is not caller and not (
+                target.get("delegated") is True and target.get("parent_chat_id") == caller["id"])):
+            raise ValueError("Можно переименовать только свой или непосредственно подчинённый ИИ-чат.")
+        return self.rename_chat(target["id"], title)
+
     def save(self):
         for profile in self.profiles:
             if profile["id"] == self.active_profile:
@@ -362,6 +392,7 @@ class PiProcess(QObject):
     error = pyqtSignal(str)
     busy_changed = pyqtSignal(bool)
     ready_changed = pyqtSignal(bool)
+    context_usage = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -468,6 +499,11 @@ class PiProcess(QObject):
                 elif command == "get_state":
                     self._deadline.stop()
                     self._set_ready(True)
+                    # Pi's authoritative context accounting is exposed by this RPC command.
+                    self.command({"id": str(uuid.uuid4()), "type": "get_session_stats"})
+                elif command == "get_session_stats":
+                    self._deadline.stop()
+                    self.context_usage.emit(record.get("data", {}).get("contextUsage"))
                 elif command == "get_messages":
                     self._deadline.stop()
                 elif command == "prompt" and not self._stopping:

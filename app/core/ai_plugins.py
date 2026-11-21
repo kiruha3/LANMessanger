@@ -1,8 +1,8 @@
 PLUGINS = {
     "images": ("Генерация изображений", "Создание картинок, выбор модели и проверка очереди", "Изображения",
                ("generate_image", "list_image_models", "get_image_status", "cancel_image_generation")),
-    "chats": ("Другие ИИ-чаты", "Поиск и чтение чатов, вопросы другому агенту по вашему запросу", "Чаты",
-              ("list_chats", "read_chat", "list_agent_models", "ask_agent")),
+    "chats": ("Другие ИИ-чаты", "Поиск, чтение и переименование чатов, вопросы другому агенту по вашему запросу", "Чаты",
+              ("list_chats", "read_chat", "list_agent_models", "ask_agent", "rename_chat")),
 }
 
 

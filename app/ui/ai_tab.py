@@ -13,7 +13,7 @@ from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QImage, QPainte
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QDialog, QDialogButtonBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QInputDialog, QMenu, QProgressBar, QScrollArea, QSplitter, QStyle, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QInputDialog, QMenu, QMessageBox, QProgressBar, QScrollArea, QSplitter, QStyle, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINKING_LEVELS, RESPONSE_STYLES,
@@ -210,11 +210,12 @@ class AITab(QWidget):
                               config={}, key="", profile_id="", image_tool_requests={}, image_catalog_requests={},
                               image_status_requests={}, agent_requests={}, agent_parent_request=None, agent_depth=0,
                               draft="", disabled_tools=(), steering={}, followups={}, redirect=None,
-                              using_tools=False, agent_active=False)
+                              using_tools=False, agent_active=False, context_usage=None)
         run.attachments = []
         run.sent_images = []
         for signal, handler in ((run.rpc.received, self._event), (run.rpc.error, self._error),
                                 (run.rpc.busy_changed, self._busy_changed), (run.rpc.ready_changed, self._ready_changed),
+                                (run.rpc.context_usage, self._context_usage_changed),
                                 (run.images.completed, self._image_completed), (run.images.failed, self._image_failed),
                                 (run.images.job_started, self._image_queued),
                                 (run.images.queue_updated, self._image_queue_updated),
@@ -264,6 +265,28 @@ class AITab(QWidget):
 
     def _visible_run(self):
         return self._event_run is None or self._event_run is self._selected_run
+
+    @staticmethod
+    def _context_usage_text(usage):
+        """Render only a valid Pi context snapshot; empty/compacted data is unknown."""
+        if not isinstance(usage, dict) or not usage:
+            return "Контекст: ?"
+        tokens, window, percent = usage.get("tokens"), usage.get("contextWindow"), usage.get("percent")
+        if not isinstance(window, (int, float)) or window <= 0:
+            return "Контекст: ?"
+        if isinstance(tokens, (int, float)) and isinstance(percent, (int, float)):
+            return f"Контекст: {int(tokens):,}/{int(window):,} ({percent:.1f}%)".replace(",", " ")
+        return f"Контекст: ?/{int(window):,}".replace(",", " ")
+
+    def _show_context_usage(self, run):
+        if run is self._selected_run:
+            self.context_label.setText(self._context_usage_text(run.context_usage))
+
+    def _context_usage_changed(self, usage):
+        """Store usage on the emitting run; only the selected run may paint the label."""
+        run = self._event_run or self._selected_run
+        run.context_usage = usage if isinstance(usage, dict) and usage else None
+        self._show_context_usage(run)
 
     def _set_activity(self, text, active):
         self._run().activity = (text, active)
@@ -540,6 +563,10 @@ class AITab(QWidget):
         composer_layout.addLayout(self.attachments_row)
         composer_layout.addWidget(self.input)
         footer = QHBoxLayout()
+        self.context_label = QLabel("Контекст: ?")
+        self.context_label.setToolTip("Текущий контекст по данным Pi; после compaction значение может быть неизвестно до следующего ответа модели.")
+        self.context_label.setStyleSheet("color: " + theme.bubbles()['ts'] + "; background: transparent;")
+        footer.addWidget(self.context_label)
         self.access_label = QLabel("Полный доступ")
         self.access_label.setStyleSheet("color: #d99341; background: transparent;")
         self.access_label.setToolTip("Агент читает и меняет файлы и выполняет команды с правами текущего пользователя, в том числе за пределами рабочей папки.")
@@ -792,7 +819,7 @@ class AITab(QWidget):
         titles = {chat["id"]: chat["title"] for chat in self.store.chats}
         waiting, working = {}, {}
         for link in self.store.agent_links.values():
-            if link["status"] == "waiting":
+            if link["status"] == "waiting" or link.get("state") in ("accepted", "running"):
                 waiting.setdefault(link["source"], []).append(titles.get(link["target"], "ИИ-чат"))
                 working.setdefault(link["target"], []).append(titles.get(link["source"], "ИИ-чат"))
         return waiting, working
@@ -1253,8 +1280,44 @@ class AITab(QWidget):
         menu = QMenu(self.chat_list)
         action = menu.addAction("Открепить чат" if chat.get("pinned") else "Закрепить чат")
         action.triggered.connect(lambda: self._toggle_chat_pin(chat_id))
+        rename = menu.addAction("Переименовать чат…")
+        rename.triggered.connect(lambda: self._prompt_rename_chat(chat_id), Qt.ConnectionType.QueuedConnection)
         menu.popup(self.chat_list.viewport().mapToGlobal(point))
         menu.aboutToHide.connect(menu.deleteLater)
+
+    def _prompt_rename_chat(self, chat_id):
+        if self._closed or not self.store:
+            return
+        chat = next((c for c in self.store.chats if c["id"] == chat_id), None)
+        if chat is None:
+            return
+        title = chat["title"]
+        while True:
+            title, accepted = QInputDialog.getText(self, "Переименовать чат", "Название:", text=title)
+            if not accepted:
+                return
+            try:
+                chat = self.store.rename_chat(chat_id, title)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Переименовать чат", str(exc))
+                continue
+            self._refresh_chat_title(chat)
+            return
+
+    def _refresh_chat_title(self, chat):
+        chat_id = chat["id"]
+        affected = {chat_id}
+        for link in self.store.agent_links.values():
+            if chat_id in (link["source"], link["target"]):
+                affected.update((link["source"], link["target"]))
+        waiting, working = self._agent_link_activity()
+        for entry in self.store.chats:
+            entry_id = entry["id"]
+            if entry_id in affected and (item := self.chat_list.items.get(entry_id)) is not None:
+                self._style_chat_item(item, entry, waiting.get(entry_id, []), working.get(entry_id, []))
+        if self._current and self._current["id"] in affected:
+            self._refresh_agent_links()
+            self._render_run(self._selected_run, scroll_to_end=False)
 
     def _toggle_chat_pin(self, chat_id):
         chat = next((chat for chat in self.store.chats if chat["id"] == chat_id), None) if self.store else None
@@ -1344,6 +1407,9 @@ class AITab(QWidget):
         if self.current["id"] not in self._runs:
             self._runs[self.current["id"]] = self._make_run(self.current)
         self._selected_run = self._runs[self.current["id"]]
+        # QLabel is shared by all chats: never leave the previous chat's snapshot visible.
+        self._show_context_usage(self._selected_run)
+        QTimer.singleShot(0, lambda run=self._selected_run: self._refresh_context_usage(run))
         self._sync_chat_tools()
         self.current["unread_result"] = False
         self._update_chat_item(self.current)
@@ -1755,7 +1821,7 @@ class AITab(QWidget):
                                          **({"images": list(attachments), "attachment_message": True} if attachments else {}),
                                          **({"image_message": True} if image else {})})
         self.timeline = Timeline(self.current["messages"], self.rpc.redact)
-        if self.current["title"] == "Новый чат":
+        if self.current["title"] == "Новый чат" and not self.current.get("title_custom"):
             self.current["title"] = text.replace("\n", " ")[:45]
             self._update_chat_item(self.current)
         self.current["running"] = True
@@ -2397,9 +2463,12 @@ class AITab(QWidget):
         return f"{prefix}{tip}\nПричина: {text}"
 
     def _event(self, event):
+        kind = event.get("type")
+        if kind == "extension_ui_request" and event.get("method") == "input" and event.get("title") == "lanmessenger.rename_chat":
+            self._rename_chat_request(event)
+            return
         if not self.current:
             return
-        kind = event.get("type")
         run = self._run()
         if kind in ("agent_start", "agent_end"):
             run.agent_active = kind == "agent_start"
@@ -2522,6 +2591,9 @@ class AITab(QWidget):
                 self._task_error = self.rpc.redact(message.get("errorMessage") or "Провайдер прервал выполнение задачи")
         self.timeline.event(event)
         if kind == "agent_end":
+            # Defer the stats query until Pi has finished flushing the final event;
+            # this also keeps completion handling non-blocking.
+            QTimer.singleShot(0, lambda run=run: self._refresh_context_usage(run))
             if run.redirect:
                 self.timeline.finish("stopped")
                 self._save()
@@ -2583,6 +2655,8 @@ class AITab(QWidget):
     def _update_agent_link_outcome(self, request, outcome):
         link = self.store.agent_links[request["link_id"]]
         link["status"] = outcome
+        link["state"] = {"completed": "succeeded", "failed": "failed", "stopped": "cancelled",
+                          "timeout": "timeout"}.get(outcome, outcome)
         if not self._closed:
             self._fill_chats()
             self._dispatch_run(self._selected_run, self._render)
@@ -2618,12 +2692,15 @@ class AITab(QWidget):
                 if type(timeout) is not int or not 5 <= timeout <= 900:
                     raise ValueError("Ожидание ответа агента — от 5 до 900 секунд.")
                 chat = None
+                request_id = str(uuid.uuid4())
                 if params.get("chat_id"):
                     if params.get("account") or params.get("model"):
                         raise ValueError("Для существующего чата модель и аккаунт не переопределяются.")
                     chat = next((chat for chat in self.store.chats if chat["id"] == params["chat_id"]), None)
                     if chat is None:
                         raise ValueError("ИИ-чат не найден. Найдите его через list_chats.")
+                    # An explicit idle chat_id is an allowed target selected by the user;
+                    # newly created targets are always owned as direct children below.
                     existing = self._runs.get(chat["id"])
                     if chat is self.current or chat.get("running") or (existing and (existing.pending or existing.rpc.busy or existing.images.busy or existing.agent_parent_request)):
                         raise ValueError("Чат занят или ожидает этот запрос. Дождитесь завершения либо выберите новый чат.")
@@ -2672,11 +2749,13 @@ class AITab(QWidget):
                 timer.setSingleShot(True)
                 link_id = str(uuid.uuid4())
                 self.store.agent_links[link_id] = {"id": link_id, "source": parent.chat["id"],
-                                                  "target": chat["id"], "status": "waiting",
+                                                  "target": chat["id"], "status": "waiting", "state": "accepted",
+                                                  "request_id": request_id, "chat_id": chat["id"],
                                                   "question": self.rpc.redact(question.strip()),
                                                   "tool_id": params.get("tool_call_id")}
-                child.agent_parent_request = {"run": parent, "id": event["id"], "timer": timer,
-                                              "start": len(chat["messages"]), "link_id": link_id}
+                child.agent_parent_request = {"run": parent, "id": event["id"], "request_id": request_id,
+                                              "timer": timer, "start": len(chat["messages"]), "link_id": link_id,
+                                              "wait_for_result": params.get("wait_for_result", True) is not False}
                 parent.agent_requests[event["id"]] = child
                 timer.timeout.connect(lambda: self._dispatch_run(child, self._agent_timeout))
                 timer.start(timeout * 1000)
@@ -2685,7 +2764,16 @@ class AITab(QWidget):
                 self._save()
                 self._dispatch_run(self._selected_run, self._render)
                 self._set_activity("Ожидает ответ из чата «" + chat["title"] + "»…", True)
+                if not child.agent_parent_request["wait_for_result"]:
+                    # Resolve the tool call immediately. The child remains linked and its
+                    # completion is delivered later as a queued follow-up notification.
+                    parent.rpc.command({"type": "extension_ui_response", "id": event["id"],
+                                        "value": json.dumps({"request_id": request_id, "chat_id": chat["id"],
+                                                             "status": "accepted",
+                                                             "notification": "result will arrive by request_id and chat_id"}, ensure_ascii=False)})
                 try:
+                    self.store.agent_links[link_id]["state"] = "running"
+                    self._fill_chats()
                     self._dispatch_run(child, self._start_text_run,
                                        "Вопрос агента из чата «" + self.current["title"] + "»:\n\n" + question.strip())
                 except (OSError, ValueError, RuntimeError) as exc:
@@ -2712,7 +2800,8 @@ class AITab(QWidget):
         self._update_agent_link_outcome(request, outcome)
         if self._closed or parent.stopped:
             return
-        result = {"chat_id": self.current["id"], "model": child.config["model"], "status": outcome}
+        result = {"request_id": request.get("request_id", request["id"]),
+                  "chat_id": self.current["id"], "model": child.config["model"], "status": outcome}
         if outcome == "completed":
             answer = "\n\n".join(message.get("text", "") for message in self.current["messages"][request["start"]:]
                                    if message.get("role") == "assistant" and message.get("text"))
@@ -2722,10 +2811,52 @@ class AITab(QWidget):
             result["error"] = child.rpc.redact(self.current.get("last_error") or
                                                 ("Истекло время ожидания ответа агента." if outcome == "timeout" else "Задача другого агента остановлена."))
         try:
-            parent.rpc.command({"type": "extension_ui_response", "id": request["id"],
-                                "value": json.dumps(result, ensure_ascii=False)})
+            if request.get("wait_for_result", True):
+                parent.rpc.command({"type": "extension_ui_response", "id": request["id"],
+                                    "value": json.dumps(result, ensure_ascii=False)})
+            else:
+                # A follow-up is an RPC notification to the still-running parent, not a
+                # second tool result. It lets the parent continue while the child works.
+                notice = "Результат делегированной задачи (request_id=" + result["request_id"] + ", chat_id=" + self.current["id"] + "):\n" + json.dumps(result, ensure_ascii=False)
+                parent.rpc.command({"type": "follow_up", "id": request["id"],
+                                    "request_id": result["request_id"], "chat_id": result["chat_id"],
+                                    "message": notice})
         except RuntimeError:
             pass
+
+    def _refresh_context_usage(self, run):
+        if self._closed or run.rpc.process.state() != QProcess.ProcessState.Running:
+            return
+        try:
+            run.rpc.command({"id": str(uuid.uuid4()), "type": "get_session_stats"})
+        except RuntimeError:
+            pass
+
+    def _rename_chat_request(self, event):
+        # Only the PiProcess signal binding supplies the caller; the payload cannot.
+        run = self._event_run
+        if run is None:
+            return
+        try:
+            caller = run.chat
+            if self._closed or run.stopped or not caller or self._runs.get(caller["id"]) is not run:
+                raise ValueError("Вызывающий ИИ-чат не определён или остановлен.")
+            if "rename_chat" in disabled_tools(caller):
+                raise ValueError("Инструмент переименования отключён в этом чате.")
+            params = json.loads(event.get("placeholder", "{}"))
+            if not isinstance(params, dict) or set(params) - {"chat_id", "title"}:
+                raise ValueError("Некорректный запрос переименования.")
+            chat_id = params.get("chat_id", caller["id"])
+            if not isinstance(chat_id, str) or not chat_id:
+                raise ValueError("Некорректный ID ИИ-чата.")
+            chat = self.store.rename_agent_chat(caller, chat_id, params.get("title"))
+        except (ValueError, TypeError) as exc:
+            result = {"error": str(exc)}
+        else:
+            self._refresh_chat_title(chat)
+            result = {"id": chat["id"], "title": chat["title"]}
+        run.rpc.command({"type": "extension_ui_response", "id": event["id"],
+                         "value": json.dumps(result, ensure_ascii=False)})
 
     def _read_chat_request(self, event):
         try:
@@ -2764,20 +2895,22 @@ class AITab(QWidget):
                           "value": json.dumps(result, ensure_ascii=False)})
 
     def _render(self):
-        if not self.current or not self._visible_run():
-            return
-        self.chat_title.setText(self.current["title"])
+        if self.current and self._visible_run():
+            self._render_run(self._run())
+
+    def _render_run(self, run, scroll_to_end=True):
+        chat = run.chat
+        self.chat_title.setText(chat["title"])
         # Also assign stable identities to legacy/system entries appended outside the projection.
-        for message in self.current["messages"]:
+        for message in chat["messages"]:
             if "id" not in message:
                 message["id"] = str(uuid.uuid4())
-        run = self._run()
         pending = [(request_id, text, "steering") for request_id, text in run.steering.items()]
         if run.redirect:
             pending.append((*run.redirect, "redirecting"))
         pending.extend((request_id, text, "queued") for request_id, text in run.followups.items())
-        chat_id = self.current["id"]
-        titles = {chat["id"]: chat["title"] for chat in self.store.chats}
+        chat_id = chat["id"]
+        titles = {entry["id"]: entry["title"] for entry in self.store.chats}
         linked = {}
         tools = {}
         for link in self.store.agent_links.values():
@@ -2793,7 +2926,7 @@ class AITab(QWidget):
             if not incoming and isinstance(link.get("tool_id"), str):
                 tools[link["tool_id"]] = message_id
         messages = []
-        for message in self.current["messages"]:
+        for message in chat["messages"]:
             message_id = tools.get(message.get("tool_id")) if message.get("role") == "tool" else message["id"]
             card = linked.pop(message_id, None)
             if card is None:
@@ -2803,8 +2936,8 @@ class AITab(QWidget):
                     card["result"] = message["result"]
                 messages.append(card)
         self.output.set_messages(messages + list(linked.values()) + [
-            {"id": request_id, "role": "user", "text": self.rpc.redact(text), "status": status}
-            for request_id, text, status in pending])
+            {"id": request_id, "role": "user", "text": run.rpc.redact(text), "status": status}
+            for request_id, text, status in pending], scroll_to_end=scroll_to_end)
 
     def _start_auth(self):
         if self._installing:

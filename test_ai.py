@@ -43,6 +43,8 @@ for line in sys.stdin.buffer:
         emit({"type":"response", "command":kind, "success":True, "data":{"isStreaming":False}})
     elif kind == "get_messages":
         emit({"type":"response", "command":kind, "success":True, "data":{"messages":[]}})
+    elif kind == "get_session_stats":
+        emit({"type":"response", "command":kind, "success":True, "data":{"contextUsage":{"tokens":1234,"contextWindow":8000,"percent":15.425}}})
     elif kind == "prompt":
         if cmd["message"] == "crash": sys.exit(3)
         ok = cmd["message"] != "reject" and not any(automatic.values())
@@ -135,7 +137,9 @@ class ProcessTests(unittest.TestCase):
         self.script.write_text(FAKE, encoding="utf-8")
         self.rpc = PiProcess()
         self.events, self.errors = [], []
+        self.context = []
         self.rpc.received.connect(self.events.append)
+        self.rpc.context_usage.connect(self.context.append)
         self.rpc.error.connect(self.errors.append)
         self.rpc.start(sys.executable, [str(self.script)], self.temp.name, {})
         wait_for(lambda: self.rpc.ready)
@@ -143,6 +147,15 @@ class ProcessTests(unittest.TestCase):
     def tearDown(self):
         self.rpc.shutdown()
         self.temp.cleanup()
+
+    def test_session_stats_exposes_authoritative_context_usage(self):
+        wait_for(lambda: self.context)
+        self.assertEqual(self.context[-1], {"tokens": 1234, "contextWindow": 8000, "percent": 15.425})
+
+    def test_empty_context_usage_is_forwarded_as_empty_snapshot(self):
+        self.context.clear()
+        self.rpc.context_usage.emit({})
+        self.assertEqual(self.context, [{}])
 
     def test_stream_and_finished_state(self):
         self.rpc.send_prompt("hello")

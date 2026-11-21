@@ -12,3 +12,5 @@ hub.key
 test_tmp_rooms/
 .server_creds
 ai-data/
+dist-test/
+build-test-0247/

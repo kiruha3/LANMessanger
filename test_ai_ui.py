@@ -28,6 +28,155 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_context_usage_is_scoped_to_selected_run_and_resets_on_switch(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                first = tab.current
+                second = tab.store.new_chat(root)
+                tab._fill_chats()
+                tab._context_usage_changed({"tokens": 1200, "contextWindow": 8000, "percent": 15})
+                self.assertIn("1 200", tab.context_label.text())
+                first_run = tab._selected_run
+                tab._select_chat(next(i for i, chat in enumerate(tab.store.chats) if chat["id"] == second["id"]))
+                self.assertEqual(tab.context_label.text(), "Контекст: ?")
+                second_run = tab._selected_run
+                tab._event_run = first_run
+                tab._context_usage_changed({"tokens": 7000, "contextWindow": 8000, "percent": 87.5})
+                tab._event_run = None
+                self.assertEqual(tab.context_label.text(), "Контекст: ?")
+                tab._event_run = second_run
+                tab._context_usage_changed({})
+                tab._event_run = None
+                self.assertEqual(tab.context_label.text(), "Контекст: ?")
+                tab._event_run = second_run
+                tab._context_usage_changed({"tokens": 400, "contextWindow": 8000, "percent": 5})
+                tab._event_run = None
+                self.assertIn("400", tab.context_label.text())
+                tab._select_chat(next(i for i, chat in enumerate(tab.store.chats) if chat["id"] == first["id"]))
+                self.assertIn("7 000", tab.context_label.text())
+            finally:
+                tab._event_run = None
+                tab.shutdown(); tab.close()
+
+    def test_rename_menu_updates_tree_header_link_and_reopens(self):
+        from PyQt6.QtWidgets import QMenu
+
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(900, 550)
+            tab.show()
+            try:
+                source = tab.current
+                child = tab.store.new_chat(root)
+                child.update(delegated=True, parent_chat_id=source["id"])
+                tab.store.agent_links["rename-test"] = dict(id="rename-test", source=source["id"],
+                    target=child["id"], question="Вопрос", status="waiting")
+                tab._fill_chats()
+                tab._render()
+                tree = tab.chat_list
+                row = tree.items[child["id"]]
+                tree.scrollToItem(row)
+                APP.processEvents()
+                with patch("app.ui.ai_tab.QInputDialog.getText", side_effect=[("   ", True), ("  Редактор  ", True)]), \
+                     patch("app.ui.ai_tab.QMessageBox.warning") as warning:
+                    tree.customContextMenuRequested.emit(tree.visualItemRect(row).center())
+                    menu = next(menu for menu in tree.findChildren(QMenu) if menu.isVisible())
+                    next(action for action in menu.actions() if action.text() == "Переименовать чат…").trigger()
+                    menu.close()
+                    wait_for(lambda: child["title"] == "Редактор")
+                    warning.assert_called_once()
+                self.assertIs(tab.current, source)
+                self.assertIs(tree.items[child["id"]], row)
+                self.assertIn("Редактор", row.text(0))
+                self.assertIn("Редактор", tab.agent_link_status.text())
+                self.assertIn("Редактор", tab.output.rows["rename-test:out"].header.text())
+                tab._open_ai_chat(child["id"])
+                self.assertEqual(tab.chat_title.text(), "Редактор")
+                with patch("app.ui.ai_tab.QInputDialog.getText", return_value=("Не применять", False)):
+                    tab._prompt_rename_chat(child["id"])
+                self.assertEqual(child["title"], "Редактор")
+            finally:
+                tab.shutdown(); tab.close()
+            restored = AITab(data_dir=root, work_dir=root)
+            try:
+                restored._open_ai_chat(child["id"])
+                self.assertEqual(restored.chat_title.text(), "Редактор")
+            finally:
+                restored.shutdown(); restored.close()
+
+    def test_rename_rpc_uses_bound_caller_not_selected_chat_or_payload(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                caller = tab._run()
+                child, grandchild, peer, image = [tab.store.new_chat(root) for _ in range(4)]
+                child.update(delegated=True, parent_chat_id=caller.chat["id"])
+                grandchild.update(delegated=True, parent_chat_id=child["id"])
+                image.update(parent_chat_id=caller.chat["id"])
+                tab.store.agent_links["peer"] = dict(id="peer", source=caller.chat["id"],
+                    target=peer["id"], question="Вопрос", status="completed")
+                tab._fill_chats()
+                tab._open_ai_chat(child["id"])
+
+                def rename(run=caller, **params):
+                    with patch.object(run.rpc, "command") as reply:
+                        run.rpc.received.emit({"type": "extension_ui_request", "method": "input",
+                            "title": "lanmessenger.rename_chat", "id": "test", "placeholder": json.dumps(params)})
+                    reply.assert_called_once()
+                    return json.loads(reply.call_args.args[0]["value"])
+
+                self.assertEqual(rename(title="Новый чат"), {"id": caller.chat["id"], "title": "Новый чат"})
+                self.assertTrue(caller.chat["title_custom"])
+                self.assertEqual(rename(chat_id=child["id"], title=" Исполнитель ")["title"], "Исполнитель")
+                self.assertIs(tab.current, child)
+                self.assertEqual(tab.chat_title.text(), "Исполнитель")
+                for forbidden in (grandchild["id"], peer["id"], image["id"], "missing"):
+                    self.assertIn("error", rename(chat_id=forbidden, title="Чужой"))
+                self.assertIn("error", rename(tab._selected_run, chat_id=caller.chat["id"], title="Родитель"))
+                self.assertIn("error", rename(chat_id=grandchild["id"], caller_id=child["id"], title="Подмена"))
+                for invalid in (" ", "x" * 81, "a\nb", "a\u2028b", "a\x00b", 123, None):
+                    self.assertIn("error", rename(chat_id=child["id"], title=invalid))
+                self.assertEqual(child["title"], "Исполнитель")
+                self.assertEqual(peer["title"], "Новый чат")
+                caller.chat["disabled_plugins"] = ["chats"]
+                self.assertIn("error", rename(title="Запрещено"))
+            finally:
+                tab.shutdown(); tab.close()
+
+    def test_rename_through_real_pi_rpc(self):
+        import threading
+        from http.server import ThreadingHTTPServer
+        from test_ai_pi import LocalAPI
+        from app.core.ai import rpc_command
+
+        try:
+            rpc_command()
+        except ValueError as exc:
+            self.skipTest(str(exc))
+        with tempfile.TemporaryDirectory() as root:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), LocalAPI)
+            server.requests = []
+            server.tool_name = "rename_chat"
+            server.tool_arguments = {"title": "Координатор"}
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+                tab.endpoint.setText(f"http://127.0.0.1:{server.server_port}/v1")
+                tab.key.setText("local-rename-test-key")
+                tab.model.setEditText("test-model")
+                tab.input.setPlainText("Переименуй этот чат")
+                tab.send_btn.click()
+                wait_for(lambda: tab.current.get("outcome") == "completed", 30)
+                self.assertIn("rename_chat", [tool["function"]["name"] for tool in server.requests[0]["tools"]])
+                self.assertEqual(tab.current["title"], "Координатор")
+                self.assertEqual(tab.chat_title.text(), "Координатор")
+            finally:
+                tab.shutdown(); tab.close()
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
+
     def test_agent_card_waits_until_click_finishes_to_open_collapsed_branch(self):
         from PyQt6.QtWidgets import QPushButton
 
@@ -136,6 +285,82 @@ class AITabTests(unittest.TestCase):
             finally:
                 tab.shutdown()
                 tab.close()
+
+    def test_async_delegation_returns_ids_and_late_follow_up_is_correlated(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                parent = tab._run()
+                tab.model.setEditText("parent-model")
+                tab._save_connection()
+                with patch.object(tab, "_start_text_run", side_effect=tab._begin_task):
+                    with patch.object(parent.rpc, "command") as command:
+                        tab._dispatch_run(parent, tab._agent_request, {"title": "lanmessenger.ask_agent", "id": "tool-async",
+                            "placeholder": json.dumps({"question": "Сделай позже", "wait_for_result": False})})
+                        accepted = json.loads(command.call_args.args[0]["value"])
+                self.assertEqual(accepted["status"], "accepted")
+                self.assertRegex(accepted["request_id"], r"^[0-9a-f-]{36}$")
+                self.assertRegex(accepted["chat_id"], r"^[0-9a-f-]{36}$")
+                request = parent.agent_requests["tool-async"].agent_parent_request
+                self.assertEqual(request["request_id"], accepted["request_id"])
+                self.assertFalse(request["wait_for_result"])
+                child = parent.agent_requests["tool-async"]
+                self.assertIsNotNone(child.agent_parent_request)
+                with patch.object(child.rpc, "command"), patch.object(parent.rpc, "command") as late:
+                    tab._dispatch_run(child, tab._finish_text_run, "completed")
+                    notice = late.call_args.args[0]
+                    self.assertEqual(notice["type"], "follow_up")
+                    self.assertIn(accepted["request_id"], notice["message"])
+                    self.assertIn(accepted["chat_id"], notice["message"])
+            finally:
+                tab.shutdown(); tab.close()
+
+    def test_two_async_delegations_are_independent_and_correlated(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                parent = tab._run()
+                tab.model.setEditText("parent-model")
+                tab._save_connection()
+                requests = []
+                with patch.object(tab, "_start_text_run", side_effect=tab._begin_task), patch.object(parent.rpc, "command") as command:
+                    for tool_id, question in (("tool-1", "Sol-1"), ("tool-2", "Sol-2")):
+                        tab._dispatch_run(parent, tab._agent_request, {"title": "lanmessenger.ask_agent", "id": tool_id,
+                            "placeholder": json.dumps({"question": question, "wait_for_result": False})})
+                        accepted = json.loads(command.call_args.args[0]["value"])
+                        requests.append((tool_id, accepted))
+                self.assertEqual(len(parent.agent_requests), 2)
+                self.assertEqual(len({item[1]["request_id"] for item in requests}), 2)
+                self.assertEqual(len({item[1]["chat_id"] for item in requests}), 2)
+                children = list(parent.agent_requests.values())
+                self.assertTrue(all(child.agent_parent_request["wait_for_result"] is False for child in children))
+                self.assertTrue(all(tab.store.agent_links[child.agent_parent_request["link_id"]]["state"] == "running" for child in children))
+                with patch.object(parent.rpc, "command") as late:
+                    for child, expected in reversed(list(zip(children, requests))):
+                        with patch.object(child.rpc, "command"):
+                            tab._dispatch_run(child, tab._finish_text_run, "completed")
+                        msg = late.call_args.args[0]
+                        self.assertEqual(msg["type"], "follow_up")
+                        self.assertEqual(msg["request_id"], expected[1]["request_id"])
+                        self.assertEqual(msg["chat_id"], expected[1]["chat_id"])
+                self.assertEqual(parent.agent_requests, {})
+            finally:
+                tab.shutdown(); tab.close()
+
+    def test_existing_delegation_rejects_unrelated_chat(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                parent = tab._run()
+                other = tab.store.new_chat(root)
+                with patch.object(parent.rpc, "command") as command:
+                    tab._dispatch_run(parent, tab._agent_request, {"title": "lanmessenger.ask_agent", "id": "tool-peer",
+                        "placeholder": json.dumps({"question": "Нет", "chat_id": other["id"], "wait_for_result": False})})
+                    result = json.loads(command.call_args.args[0]["value"])
+                self.assertIn("error", result)
+                self.assertEqual(parent.agent_requests, {})
+            finally:
+                tab.shutdown(); tab.close()
 
     def test_agent_links_preserve_nested_chats_directions_and_waiting_after_selection(self):
         with tempfile.TemporaryDirectory() as root:
