@@ -15,6 +15,7 @@ import uuid
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
 
 from .ai_images import HORDE_MODEL, HORDE_URL
+from .agent_roles import SCHEMA_VERSION, default_role, migrate_file, child_capabilities
 
 
 PI_VERSION = "0.73.1"
@@ -97,17 +98,31 @@ class AIStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "state.json"
+        if self.path.exists():
+            migrated, _backup = migrate_file(self.path)
+        else:
+            migrated = None
         self.config = default_config()
         self.chats = []
         self.agent_links = {}
+        self.audit = []
         self.profiles = []
         self.active_profile = "default"
         self.active_chat = ""
+        migrated = None
         if self.path.exists():
             try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
+                data = migrated or json.loads(self.path.read_text(encoding="utf-8"))
                 self.config.update({k: str(v) for k, v in data["config"].items() if k in self.config})
                 self.chats = data["chats"]
+                role = data.get("role") or default_role()
+                self.role = role
+                for chat in self.chats:
+                    chat.setdefault("role_id", role["role_id"])
+                    chat.setdefault("role_version", role["role_version"])
+                    chat.setdefault("prompt_revision", role["prompt_revision"])
+                    chat.setdefault("policy_version", role["policy_version"])
+                    chat.setdefault("role_snapshot", dict(role))
                 self.active_chat = data.get("active_chat", "")
                 if not isinstance(self.active_chat, str):
                     raise ValueError("Invalid active chat")
@@ -138,6 +153,7 @@ class AIStore:
                         if link.get("status") == "waiting":
                             link["status"] = "interrupted"
                         self.agent_links[link["id"]] = link
+                self.audit = data.get("audit", []) if isinstance(data.get("audit", []), list) else []
                 self.profiles = data.get("profiles", [])
                 self.active_profile = data.get("active_profile", "default")
                 if not isinstance(self.profiles, list):
@@ -162,6 +178,8 @@ class AIStore:
                     self.config.update({k: str(v) for k, v in selected["config"].items() if k in self.config})
             except (ValueError, KeyError, TypeError, AttributeError, StopIteration) as exc:
                 raise ValueError(f"Не удалось прочитать историю ИИ: {self.path}. Файл сохранён без изменений.") from exc
+        if not hasattr(self, "role"):
+            self.role = default_role()
         if not self.profiles:
             self.profiles = [{"id": "default", "name": "Основной", "config": dict(self.config)}]
             self.active_profile = "default"
@@ -213,6 +231,11 @@ class AIStore:
         sessions = self.root / "sessions"
         sessions.mkdir(exist_ok=True)
         chat = {"id": chat_id, "folder": str(Path(folder).resolve()), "title": "Новый чат",
+                "role_id": self.role["role_id"], "role_version": self.role["role_version"],
+                "prompt_revision": self.role["prompt_revision"], "policy_version": self.role["policy_version"],
+                "role_snapshot": dict(self.role),
+                "capabilities": list(self.role["capabilities"]),
+                "delegated_capabilities": list(self.role["delegated_capabilities"]),
                 "session": str(sessions / f"{chat_id}.jsonl"), "messages": [],
                 "ai_selection": {"profile_id": self.active_profile, "model": self.config["model"]},
                 "running": False, "interrupted": False, "last_activity": time.time()}
@@ -220,6 +243,11 @@ class AIStore:
         self.active_chat = chat_id
         self.save()
         return chat
+
+    def audit_event(self, event, **details):
+        self.audit.append({"id": str(uuid.uuid4()), "time": time.time(), "event": event, **details})
+        self.audit = self.audit[-1000:]
+        self.save()
 
     def rename_chat(self, chat_id, title):
         chat = next((c for c in self.chats if c["id"] == chat_id), None)
@@ -255,7 +283,9 @@ class AIStore:
             if profile["id"] == self.active_profile:
                 profile["config"] = dict(self.config)
         temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"config": self.config, "chats": self.chats, "profiles": self.profiles,
+        temporary.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "role": self.role,
+                                         "config": self.config, "chats": self.chats, "profiles": self.profiles,
+                                         "audit": self.audit[-1000:],
                                          "agent_links": list(self.agent_links.values()),
                                          "active_profile": self.active_profile, "active_chat": self.active_chat}, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, self.path)

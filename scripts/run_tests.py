@@ -20,6 +20,7 @@ TESTS = (
     "test_legacy_ack.py",
     "test_platform_support.py",
     "test_ai.py",
+    "test_agent_roles.py",
     "test_ai_profiles.py",
     "test_ai_installer.py",
     "test_updates.py",

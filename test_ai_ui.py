@@ -28,6 +28,20 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_role_inspector_shows_role_model_and_capabilities(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                tab.current["role_snapshot"] = {"name": "Координатор", "capabilities": ["delegate"]}
+                tab.current["capabilities"] = ["delegate"]
+                tab.current["model"] = "role-model"
+                tab._render()
+                self.assertIn("Координатор", tab.role_inspector.text())
+                self.assertIn("role-model", tab.role_inspector.text())
+                self.assertIn("delegate", tab.role_inspector.text())
+            finally:
+                tab.shutdown(); tab.close()
+
     def test_context_usage_is_scoped_to_selected_run_and_resets_on_switch(self):
         with tempfile.TemporaryDirectory() as root:
             tab = AITab(data_dir=root, work_dir=root)
@@ -312,6 +326,35 @@ class AITabTests(unittest.TestCase):
                     self.assertEqual(notice["type"], "follow_up")
                     self.assertIn(accepted["request_id"], notice["message"])
                     self.assertIn(accepted["chat_id"], notice["message"])
+            finally:
+                tab.shutdown(); tab.close()
+
+    def test_late_async_completion_uses_child_context_after_switch_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as root:
+            tab = AITab(data_dir=root, work_dir=root)
+            try:
+                parent = tab._run()
+                tab.model.setEditText("parent-model")
+                tab._save_connection()
+                other = tab.store.new_chat(root)
+                tab._fill_chats()
+                with patch.object(tab, "_start_text_run", side_effect=tab._begin_task), patch.object(parent.rpc, "command") as accepted:
+                    tab._dispatch_run(parent, tab._agent_request, {"title": "lanmessenger.ask_agent", "id": "late",
+                        "placeholder": json.dumps({"question": "child", "wait_for_result": False})})
+                child = next(run for run in tab._runs.values() if run is not parent and run.chat.get("delegated"))
+                child_chat_id = child.chat["id"]
+                request_id = child.agent_parent_request["request_id"]
+                tab._open_ai_chat(other["id"])
+                with patch.object(parent.rpc, "command") as command:
+                    tab._dispatch_run(child, tab._finish_text_run, "completed")
+                    msg = command.call_args.args[0]
+                    self.assertEqual(msg["chat_id"], child_chat_id)
+                    self.assertEqual(msg["request_id"], request_id)
+                    key = msg["completion_key"]
+                    command.reset_mock()
+                    tab._dispatch_run(child, tab._finish_agent_request, "completed")
+                    command.assert_not_called()
+                    self.assertEqual(key, msg["completion_key"])
             finally:
                 tab.shutdown(); tab.close()
 

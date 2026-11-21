@@ -668,6 +668,11 @@ class AITab(QWidget):
         self.chat_title = panel_title("")
         self.chat_title.setTextFormat(Qt.TextFormat.PlainText)
         right_layout.addWidget(self.chat_title)
+        self.role_inspector = QLabel()
+        self.role_inspector.setWordWrap(True)
+        self.role_inspector.setTextFormat(Qt.TextFormat.PlainText)
+        self.role_inspector.setStyleSheet("color: " + theme.bubbles()['ts'] + ";")
+        right_layout.addWidget(self.role_inspector)
         self.agent_link_status = QLabel()
         self.agent_link_status.setWordWrap(True)
         self.agent_link_status.setTextFormat(Qt.TextFormat.PlainText)
@@ -2655,6 +2660,7 @@ class AITab(QWidget):
     def _update_agent_link_outcome(self, request, outcome):
         link = self.store.agent_links[request["link_id"]]
         link["status"] = outcome
+        self.store.audit_event("delegation_finished", request_id=link.get("request_id"), chat_id=link.get("chat_id", link.get("target")), outcome=outcome)
         link["state"] = {"completed": "succeeded", "failed": "failed", "stopped": "cancelled",
                           "timeout": "timeout"}.get(outcome, outcome)
         if not self._closed:
@@ -2732,9 +2738,17 @@ class AITab(QWidget):
                     active_chat = self.store.active_chat
                     chat = self.store.new_chat(self.current["folder"])
                     self.store.active_chat = active_chat
+                    requested_caps = params.get("capabilities", parent.chat.get("capabilities", []))
+                    role = parent.chat.get("role_snapshot", {})
+                    parent_caps = parent.chat.get("capabilities", role.get("capabilities", []))
+                    delegated_caps = parent.chat.get("delegated_capabilities", role.get("delegated_capabilities", []))
+                    caps = sorted(set(parent_caps) & set(delegated_caps) & set(requested_caps or ()))
+                    if set(requested_caps or ()) - set(caps):
+                        raise ValueError("Делегирование capability запрещено политикой роли.")
                     chat.update(parent_chat_id=self.current["id"], delegated=True,
                                 title="Агент · " + config["model"] + ": " + question.replace("\n", " ")[:35],
-                                ai_selection={"profile_id": profile["id"], "model": config["model"]})
+                                ai_selection={"profile_id": profile["id"], "model": config["model"]},
+                                role_snapshot=dict(role), capabilities=caps, delegated_capabilities=caps)
                 child = self._runs.get(chat["id"])
                 if child is None:
                     child = self._make_run(chat)
@@ -2748,12 +2762,15 @@ class AITab(QWidget):
                 timer = QTimer(self)
                 timer.setSingleShot(True)
                 link_id = str(uuid.uuid4())
+                self.store.audit_event("delegation_accepted", request_id=request_id, chat_id=chat["id"], source=parent.chat["id"])
                 self.store.agent_links[link_id] = {"id": link_id, "source": parent.chat["id"],
                                                   "target": chat["id"], "status": "waiting", "state": "accepted",
                                                   "request_id": request_id, "chat_id": chat["id"],
                                                   "question": self.rpc.redact(question.strip()),
                                                   "tool_id": params.get("tool_call_id")}
-                child.agent_parent_request = {"run": parent, "id": event["id"], "request_id": request_id,
+                child.agent_parent_request = {"run": parent, "parent_chat": parent.chat, "child_chat": chat,
+                                              "id": event["id"], "request_id": request_id,
+                                              "completion_key": request_id + ":" + chat["id"], "delivered": False,
                                               "timer": timer, "start": len(chat["messages"]), "link_id": link_id,
                                               "wait_for_result": params.get("wait_for_result", True) is not False}
                 parent.agent_requests[event["id"]] = child
@@ -2790,37 +2807,40 @@ class AITab(QWidget):
 
     def _finish_agent_request(self, outcome):
         child = self._run()
-        request, child.agent_parent_request = child.agent_parent_request, None
-        if not request:
+        request = child.agent_parent_request
+        if not request or request.get("delivered"):
             return
+        request["delivered"] = True
+        child.agent_parent_request = None
         request["timer"].stop()
         request["timer"].deleteLater()
         parent = request["run"]
+        parent_chat = request["parent_chat"]
+        child_chat = request["child_chat"]
         parent.agent_requests.pop(request["id"], None)
         self._update_agent_link_outcome(request, outcome)
         if self._closed or parent.stopped:
             return
-        result = {"request_id": request.get("request_id", request["id"]),
-                  "chat_id": self.current["id"], "model": child.config["model"], "status": outcome}
+        result = {"request_id": request["request_id"], "chat_id": child_chat["id"],
+                  "completion_key": request["completion_key"], "model": child.config["model"], "status": outcome}
+        child_messages = child_chat.get("messages", [])
         if outcome == "completed":
-            answer = "\n\n".join(message.get("text", "") for message in self.current["messages"][request["start"]:]
+            answer = "\n\n".join(message.get("text", "") for message in child_messages[request["start"]:]
                                    if message.get("role") == "assistant" and message.get("text"))
             result["answer"] = child.rpc.redact(answer)[-16000:]
             result["truncated"] = len(answer) > 16000
         else:
-            result["error"] = child.rpc.redact(self.current.get("last_error") or
+            result["error"] = child.rpc.redact(child_chat.get("last_error") or
                                                 ("Истекло время ожидания ответа агента." if outcome == "timeout" else "Задача другого агента остановлена."))
         try:
             if request.get("wait_for_result", True):
                 parent.rpc.command({"type": "extension_ui_response", "id": request["id"],
                                     "value": json.dumps(result, ensure_ascii=False)})
             else:
-                # A follow-up is an RPC notification to the still-running parent, not a
-                # second tool result. It lets the parent continue while the child works.
-                notice = "Результат делегированной задачи (request_id=" + result["request_id"] + ", chat_id=" + self.current["id"] + "):\n" + json.dumps(result, ensure_ascii=False)
+                notice = "Результат делегированной задачи (request_id=" + result["request_id"] + ", chat_id=" + result["chat_id"] + "):\n" + json.dumps(result, ensure_ascii=False)
                 parent.rpc.command({"type": "follow_up", "id": request["id"],
                                     "request_id": result["request_id"], "chat_id": result["chat_id"],
-                                    "message": notice})
+                                    "completion_key": result["completion_key"], "message": notice})
         except RuntimeError:
             pass
 
@@ -2901,6 +2921,10 @@ class AITab(QWidget):
     def _render_run(self, run, scroll_to_end=True):
         chat = run.chat
         self.chat_title.setText(chat["title"])
+        role = chat.get("role_snapshot", {})
+        model = chat.get("model") or chat.get("ai_selection", {}).get("model") or "не выбрана"
+        caps = ", ".join(chat.get("capabilities", role.get("capabilities", []))) or "нет"
+        self.role_inspector.setText(f"Роль: {role.get('name', 'Ассистент')} · Модель: {model} · Права: {caps}")
         # Also assign stable identities to legacy/system entries appended outside the projection.
         for message in chat["messages"]:
             if "id" not in message:
