@@ -147,5 +147,47 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(installer.runtime_complete(target))
             self.assertFalse(backup.exists())
 
+    def test_successful_activation_is_not_reported_as_failed_when_cleanup_is_blocked(self):
+        real_temporary_directory = tempfile.TemporaryDirectory
+        with real_temporary_directory() as folder:
+            target = Path(folder, "runtime")
+            events = []
+
+            def fixture_extract(archive, destination, _cancel):
+                if archive.name.endswith("win-x64.zip"):
+                    files = [f"node-v{installer.NODE_VERSION}-win-x64/node.exe"]
+                else:
+                    files = ["package/rg.exe" if "ripgrep" in archive.name else "package/fd.exe"]
+                for name in files:
+                    file = destination / name
+                    file.parent.mkdir(parents=True, exist_ok=True)
+                    file.touch()
+
+            def fixture_extract_git(_archive, destination, _cancel):
+                shell = destination / "bin/bash.exe"
+                shell.parent.mkdir(parents=True)
+                shell.touch()
+
+            def fixture_run(_args, _cwd, env, _cancel, _timeout=600):
+                stage = Path(env["npm_config_cache"]).parent / "runtime"
+                pi = stage / "node_modules/@mariozechner/pi-coding-agent/dist"
+                pi.mkdir(parents=True, exist_ok=True)
+                for filename in ("cli.js", "index.js"):
+                    (pi / filename).touch()
+
+            def fixture_cleanup(_name, ignore_errors=False, **_kwargs):
+                if not ignore_errors:
+                    raise OSError(145, "Temporary npm cache is still in use")
+
+            with (patch.object(installer, "supported", return_value=True),
+                  patch.object(installer, "download"),
+                  patch.object(installer, "extract_zip", side_effect=fixture_extract),
+                  patch.object(installer, "extract_tar", side_effect=fixture_extract_git),
+                  patch.object(installer, "run_hidden", side_effect=fixture_run),
+                  patch.object(real_temporary_directory, "_rmtree", side_effect=fixture_cleanup)):
+                installer.install_runtime(lambda message, percent: events.append(percent), threading.Event(), target)
+            self.assertTrue(installer.runtime_complete(target))
+            self.assertEqual(events[-1], 100)
+
 
 if __name__ == '__main__': unittest.main()

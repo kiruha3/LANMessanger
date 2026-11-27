@@ -211,7 +211,7 @@ def install_runtime(progress, cancel, target: Path | None = None):
             return
         if backup.exists():
             shutil.rmtree(backup)
-        with tempfile.TemporaryDirectory(prefix='install-', dir=target.parent) as temp:
+        with tempfile.TemporaryDirectory(prefix='install-', dir=target.parent, ignore_cleanup_errors=True) as temp:
             work = Path(temp)
             stage = work / 'runtime'; stage.mkdir()
             for number, (label, (url, digest)) in enumerate(ASSETS.items()):

@@ -940,18 +940,44 @@ class AITabTests(unittest.TestCase):
                 finally:
                     tab.shutdown(); tab.close()
 
-    def test_missing_runtime_offers_install_without_downloading_or_losing_prompt(self):
-        with tempfile.TemporaryDirectory() as root, patch('app.ui.ai_tab.runtime_command', side_effect=ValueError('missing')):
+    def test_missing_runtime_is_offered_in_chat_before_model_and_not_for_horde(self):
+        with (tempfile.TemporaryDirectory() as root,
+              patch('app.ui.ai_tab.supported', return_value=True),
+              patch('app.core.ai_installer.runtime_folder', return_value=Path(root, 'missing-runtime')),
+              patch('app.core.ai.shutil.which', return_value=None),
+              patch('app.ui.ai_tab.RuntimeInstaller') as factory):
             tab = AITab(data_dir=root, work_dir=root)
+            tab.resize(860, 550)
+            tab.show()
             try:
-                self.assertFalse(tab.install_panel.isHidden())
+                APP.processEvents()
+                install = next((button for button in tab.findChildren(type(tab.install_btn))
+                                if button.text() == 'Установить компоненты ИИ' and button.isVisible()), None)
+                self.assertIsNotNone(install, 'Установку должно быть видно прямо в чате')
+                self.assertFalse(tab.model.currentText().strip())
+                tab.input.setPlainText('Первый текстовый запрос')
+                QTest.mouseClick(tab.send_btn, Qt.MouseButton.LeftButton)
+                self.assertIn('компоненты ИИ', tab.status.text())
+                self.assertEqual(tab.input.toPlainText(), 'Первый текстовый запрос')
+                self.assertEqual(tab.current["messages"], [])
                 self.assertIsNone(tab.installer)
-                tab.model.setEditText('synthetic-model')
-                tab.input.setPlainText('do something')
-                tab._send()
-                self.assertEqual(tab.input.toPlainText(), 'do something')
-                self.assertIsNone(tab.installer)
+                factory.assert_not_called()
+
+                tab._select_free_images()
+                self.assertFalse(install.isVisible())
+                with patch.object(tab, "_send_image") as image:
+                    QTest.mouseClick(tab.send_btn, Qt.MouseButton.LeftButton)
+                    image.assert_called_once()
+                tab.account.setCurrentIndex(tab.account.findData("default"))
+                self.assertTrue(install.isVisible())
+                QTest.mouseClick(install, Qt.MouseButton.LeftButton)
+                factory.return_value.start.assert_called_once()
+                self.assertTrue(tab.settings_dialog.isVisible())
+                self.assertTrue(tab.install_progress.isVisible())
+                self.assertEqual(tab.input.toPlainText(), 'Первый текстовый запрос')
             finally:
+                if tab.installer:
+                    tab.installer.isRunning.return_value = False
                 tab.shutdown(); tab.close()
 
     def test_api_disconnect_clears_memory_and_saved_key_without_pi(self):

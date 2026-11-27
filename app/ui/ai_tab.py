@@ -590,6 +590,9 @@ class AITab(QWidget):
         composer_layout.addLayout(footer)
         right = QWidget()
         right_layout = QVBoxLayout(right)
+        self.chat_install_btn = QPushButton('Установить компоненты ИИ')
+        self.chat_install_btn.clicked.connect(self._install_from_chat)
+        self.chat_install_btn.hide()
         self.install_panel = QWidget()
         install_layout = QVBoxLayout(self.install_panel)
         install_layout.setContentsMargins(0, 0, 0, 0)
@@ -618,6 +621,7 @@ class AITab(QWidget):
         settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
         settings_content = QWidget()
         settings_content_layout = QVBoxLayout(settings_content)
+        settings_content_layout.addWidget(self.install_panel)
         self.workspace_path = QLineEdit(self.work_dir)
         self.workspace_path.setReadOnly(True)
         self.workspace_btn = QPushButton("Выбрать папку…")
@@ -656,7 +660,6 @@ class AITab(QWidget):
         instruction_row.addRow("Пояснения агента", self.response_style)
         instruction_row.addRow("Промпт", self.instructions_btn)
         settings_content_layout.addLayout(instruction_row)
-        settings_content_layout.addWidget(self.install_panel)
         settings_content_layout.addStretch(1)
         settings_scroll.setWidget(settings_content)
         settings_layout.addWidget(settings_scroll)
@@ -682,6 +685,7 @@ class AITab(QWidget):
         right_layout.addWidget(self.error_settings_btn, 0, Qt.AlignmentFlag.AlignLeft)
         right_layout.addWidget(self.image_resume_btn, 0, Qt.AlignmentFlag.AlignLeft)
         right_layout.addWidget(self.output, 1)
+        right_layout.addWidget(self.chat_install_btn, 0, Qt.AlignmentFlag.AlignLeft)
         right_layout.addWidget(self.followup_actions, 0, Qt.AlignmentFlag.AlignRight)
         right_layout.addWidget(self.composer)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -736,6 +740,7 @@ class AITab(QWidget):
         self.response_style.currentIndexChanged.connect(self._connection_changed)
         self.endpoint.textChanged.connect(self._connection_changed)
         self.runtime.textChanged.connect(self._connection_changed)
+        self.runtime.editingFinished.connect(self._check_runtime)
         self.key.textChanged.connect(self._connection_changed)
         self.key.textChanged.connect(self._provider_visibility)
         self.remember.toggled.connect(self._schedule_connection_save)
@@ -1064,32 +1069,39 @@ class AITab(QWidget):
             self._fill_accounts()
 
     def _check_runtime(self):
-        if self.provider.currentData() in IMAGE_PROVIDERS:
-            self.install_panel.hide()
+        issue = ""
+        if self.provider.currentData() not in IMAGE_PROVIDERS:
+            try:
+                from ..core.ai_installer import runtime_folder, runtime_complete
+                managed = runtime_folder()
+                if managed.exists() and not runtime_complete(managed):
+                    raise ValueError("Установка компонентов ИИ не завершена. Установите их заново.")
+                runtime_command(self.runtime.text())
+                # Include the shell check without writing provider settings.
+                if os.name == 'nt':
+                    import shutil
+                    from ..core.ai_installer import managed_shell
+                    shells = [managed_shell(), Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git/bin/bash.exe']
+                    if not any(p.is_file() for p in shells) and not shutil.which('bash'):
+                        raise ValueError("Не найден Git Bash. Установите компоненты ИИ.")
+            except (OSError, ValueError) as exc:
+                issue = str(exc)
+        self.install_panel.setVisible(bool(issue) or self._installing)
+        self.chat_install_btn.setVisible(bool(issue) and supported() and not self._installing)
+        return issue
+
+    def _install_from_chat(self):
+        if self._closed or self._installing or not supported() or not self._check_runtime():
             return
-        try:
-            from ..core.ai_installer import runtime_folder, runtime_complete
-            managed = runtime_folder()
-            if managed.exists() and not runtime_complete(managed):
-                raise ValueError('incomplete managed runtime')
-            runtime_command(self.runtime.text())
-            # Include the shell check without writing provider settings.
-            if os.name == 'nt':
-                import shutil
-                from ..core.ai_installer import managed_shell
-                shells = [managed_shell(), Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git/bin/bash.exe']
-                if not any(p.is_file() for p in shells) and not shutil.which('bash'):
-                    raise ValueError('missing shell')
-        except (OSError, ValueError):
-            self.install_panel.show()
-        else:
-            self.install_panel.hide()
+        self._open_connection()
+        self._install_runtime()
 
     def _install_runtime(self):
         if self._closed or (self.installer and self.installer.isRunning()) or self._task_busy() or self._pending or self._logging_in:
             return
         self.install_btn.setEnabled(False)
         self._installing = True
+        self.chat_install_btn.hide()
         self.rpc.shutdown()
         self._stop_auth()
         self.connection_panel.setEnabled(False)
@@ -1098,6 +1110,8 @@ class AITab(QWidget):
         self.install_cancel.show()
         self.install_progress.setValue(0)
         self.install_progress.show()
+        if self.settings_dialog.isVisible():
+            self.settings_dialog.findChild(QScrollArea).ensureWidgetVisible(self.install_panel)
         self.installer = RuntimeInstaller(self)
         self.installer.progress.connect(self._install_progress)
         self.installer.succeeded.connect(self._install_done)
@@ -1123,6 +1137,7 @@ class AITab(QWidget):
         self._controls(False)
         self.install_btn.setEnabled(True)
         self.status.setText('Компоненты ИИ установлены. Настройте подключение и отправьте сообщение.')
+        self.status.show()
         self._check_runtime()
         self._open_connection()
 
@@ -1137,6 +1152,7 @@ class AITab(QWidget):
         self.install_progress.hide()
         self.install_btn.setText('Повторить установку компонентов ИИ')
         self.install_btn.setEnabled(supported())
+        self._check_runtime()
 
     def _fill_chats(self):
         expanded = {item.data(0, Qt.ItemDataRole.UserRole): item.isExpanded()
@@ -1747,8 +1763,14 @@ class AITab(QWidget):
             self._run().agent_depth = 0
             self._start_text_run(text)
         except (OSError, ValueError, RuntimeError) as exc:
-            self._error(str(exc))
-            self._check_runtime()
+            issue = self._check_runtime() if self.provider.currentData() not in IMAGE_PROVIDERS and not self.rpc.ready else ""
+            if issue:
+                self.status.setText(issue if supported() else
+                                    "Компоненты ИИ недоступны. Настройте Node.js и Pi вручную в настройках ИИ.")
+                self.status.show()
+                self.error_settings_btn.setVisible(not supported())
+            else:
+                self._error(str(exc))
 
     def _start_text_run(self, text):
         run = self._run()
@@ -1762,12 +1784,12 @@ class AITab(QWidget):
         if self.rpc.ready:
             self._submit(text)
             return
+        program, args, _module = rpc_command(config["runtime"])
         if not config["model"]:
             raise ValueError("Модель не выбрана. Нажмите шестерёнку рядом с моделью → выберите аккаунт → «Загрузить модели» → выберите доступную модель.")
         folder = self.current["folder"]
         if not Path(folder).is_dir():
             raise ValueError("Рабочая папка недоступна. Нажмите «Добавить папку…» и выберите существующий проект.")
-        program, args, _module = rpc_command(config["runtime"])
         root = self.store.root if run.profile_id == "default" else self.store.root / "profiles" / run.profile_id
         env = prepare_environment(root, config, run.key)
         env["LANMESSENGER_IMAGE_ACCOUNTS"] = json.dumps(
@@ -2278,6 +2300,7 @@ class AITab(QWidget):
         self.chat_list.setEnabled(not self._logging_in and not self._installing)
         self.connection_panel.setEnabled(not active and not self._installing)
         self.image_tool_panel.setEnabled(not active and not self._logging_in and not self._installing)
+        self.chat_install_btn.setEnabled(not active and not self._logging_in and not self._installing)
 
     def _busy_changed(self, busy):
         self._controls(busy or bool(self._pending))
