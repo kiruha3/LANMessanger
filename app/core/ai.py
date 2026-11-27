@@ -226,11 +226,11 @@ class AIStore:
         self.profiles.append(profile)
         return profile
 
-    def new_chat(self, folder: str) -> dict:
+    def new_chat(self, folder: str, mode="agent") -> dict:
         chat_id = str(uuid.uuid4())
         sessions = self.root / "sessions"
         sessions.mkdir(exist_ok=True)
-        chat = {"id": chat_id, "folder": str(Path(folder).resolve()), "title": "Новый чат",
+        chat = {"id": chat_id, "folder": str(Path(folder).resolve()), "title": "Новый чат", "mode": mode,
                 "role_id": self.role["role_id"], "role_version": self.role["role_version"],
                 "prompt_revision": self.role["prompt_revision"], "policy_version": self.role["policy_version"],
                 "role_snapshot": dict(self.role),

@@ -4,8 +4,10 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -28,6 +30,89 @@ def wait_for(predicate, timeout=5):
 
 
 class AITabTests(unittest.TestCase):
+    def test_plain_chat_sends_highlighted_context_over_http_and_reopens_without_pi(self):
+        requests = []
+        release_stream = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                requests.append((self.path, self.headers.get("Authorization"), payload))
+                second_request = len(requests) == 2
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                answer = "Частичный ответ" if second_request else "Первый ответ"
+                event = {"choices": [{"delta": {"content": answer}, "finish_reason": None}]}
+                self.wfile.write(("data: " + json.dumps(event, ensure_ascii=False) + "\r\n\r\n").encode())
+                self.wfile.flush()
+                if not second_request:
+                    self.wfile.write(b"data: [DONE]\n\n")
+                else:
+                    release_stream.wait(10)
+
+        with (tempfile.TemporaryDirectory() as root,
+              ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server,
+              patch("app.ui.ai_tab.rpc_command", side_effect=AssertionError("Plain chat must never start Pi"))):
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            tab = AITab(data_dir=root, work_dir=root)
+            tab.show()
+            try:
+                tab.provider.setCurrentIndex(tab.provider.findData("lanmessenger-api"))
+                tab.endpoint.setText(f"http://127.0.0.1:{server.server_port}/v1")
+                tab.key.setText("fixture-key")
+                tab.model.setEditText("fixture-model")
+                tab.new_btn.click()
+                self.assertEqual(tab.current.get("mode"), "text")
+                self.assertTrue(tab.chat_install_btn.isHidden())
+                self.assertTrue(tab.tools_btn.isHidden())
+                self.assertFalse(tab.context_answers.isHidden())
+                tab.context_answers.setValue(1)
+                tab.input.setPlainText("Первый вопрос")
+                tab.send_btn.click()
+                wait_for(lambda: tab.current.get("outcome") == "completed")
+                question, answer = tab.current["messages"]
+                self.assertFalse(tab.output.rows[question["id"]].property("inContext"))
+                self.assertTrue(tab.output.rows[answer["id"]].property("inContext"))
+                self.assertIn("Начало контекста", tab.output.rows[answer["id"]].header.text())
+                tab.context_answers.setValue(0)
+                self.assertTrue(tab.output.rows[question["id"]].property("inContext"))
+                tab.context_answers.setValue(1)
+                tab.input.setPlainText("Новый вопрос")
+                tab.send_btn.click()
+                wait_for(lambda: tab.current["messages"][-1].get("text") == "Частичный ответ")
+                self.assertTrue(tab.stop_btn.isVisible())
+                tab.stop_btn.click()
+                self.assertEqual(tab.current.get("outcome"), "stopped")
+                self.assertEqual(tab.current["messages"][-1]["status"], "stopped")
+                self.assertEqual(requests[1], ("/v1/chat/completions", "Bearer fixture-key", {
+                    "model": "fixture-model", "stream": True, "messages": [
+                        {"role": "assistant", "content": "Первый ответ"},
+                        {"role": "user", "content": "Новый вопрос"},
+                    ],
+                }))
+                chat_id = tab.current["id"]
+                tab.agent_btn.click()
+                self.assertEqual(tab.current.get("mode"), "agent")
+                self.assertTrue(tab.context_answers.isHidden())
+                tab._select_chat(next(i for i, chat in enumerate(tab.store.chats) if chat["id"] == chat_id))
+            finally:
+                release_stream.set()
+                tab.shutdown(); tab.close()
+                server.shutdown()
+                worker.join()
+            reopened = AITab(data_dir=root, work_dir=root)
+            try:
+                self.assertEqual(reopened.current["id"], chat_id)
+                self.assertEqual(reopened.context_answers.value(), 1)
+                self.assertEqual(reopened.current["messages"][-1]["text"], "Частичный ответ")
+            finally:
+                reopened.shutdown(); reopened.close()
+
     def test_role_inspector_shows_role_model_and_capabilities(self):
         with tempfile.TemporaryDirectory() as root:
             tab = AITab(data_dir=root, work_dir=root)

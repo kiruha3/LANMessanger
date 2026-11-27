@@ -13,7 +13,7 @@ from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QImage, QPainte
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QDialog, QDialogButtonBox, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QInputDialog, QMenu, QMessageBox, QProgressBar, QScrollArea, QSplitter, QStyle, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QInputDialog, QMenu, QMessageBox, QProgressBar, QScrollArea, QSpinBox, QSplitter, QStyle, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core.ai import (AIStore, JsonLines, KeyVault, PiProcess, PROVIDERS, THINKING_LEVELS, RESPONSE_STYLES,
@@ -23,6 +23,7 @@ from ..core.history import base_dir
 from ..core.ai_timeline import Timeline, message_text, restore_messages
 from ..core.ai_plugins import PLUGINS, disabled_plugins, disabled_tools
 from ..core.ai_catalog import APIModelCatalog
+from ..core.ai_text import DEFAULT_CONTEXT_ANSWERS, TextCompletion, chat_endpoint, context_messages
 from ..core.ai_images import (CLOUDFLARE_MODEL, HORDE_MODEL, HORDE_URL, IMAGE_PROVIDERS, ImageGenerator,
                               image_bytes, image_content, wait_for_image_cancellations)
 from ..core.ai_installer import RuntimeInstaller, runtime_environment, supported
@@ -210,7 +211,7 @@ class AITab(QWidget):
                               config={}, key="", profile_id="", image_tool_requests={}, image_catalog_requests={},
                               image_status_requests={}, agent_requests={}, agent_parent_request=None, agent_depth=0,
                               draft="", disabled_tools=(), steering={}, followups={}, redirect=None,
-                              using_tools=False, agent_active=False, context_usage=None)
+                              using_tools=False, agent_active=False, context_usage=None, text_api=None, text_reply=None)
         run.attachments = []
         run.sent_images = []
         for signal, handler in ((run.rpc.received, self._event), (run.rpc.error, self._error),
@@ -255,6 +256,8 @@ class AITab(QWidget):
                     if run.chat:
                         run.chat.update(running=False, interrupted=True, outcome="failed", last_error=message)
                 try:
+                    if run.text_api:
+                        run.text_api.cancel()
                     run.rpc.shutdown()
                 except RuntimeError:
                     pass
@@ -373,12 +376,15 @@ class AITab(QWidget):
         self._chat_pulse_timer.setInterval(700)
         self._chat_pulse_timer.timeout.connect(self._pulse_running_chats)
         self.new_btn = QPushButton("Новый чат")
-        self.new_btn.clicked.connect(self._new_chat)
+        self.new_btn.clicked.connect(lambda: self._new_chat("text"))
+        self.agent_btn = QPushButton("Агентский режим")
+        self.agent_btn.clicked.connect(lambda: self._new_chat("agent"))
         self.project_btn = QPushButton("Добавить папку…")
         self.project_btn.clicked.connect(self._choose_folder)
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.addWidget(self.new_btn)
+        left_layout.addWidget(self.agent_btn)
         left_layout.addWidget(self.project_btn)
         left_layout.addWidget(self.chat_list, 1)
         self.agent_links_btn = QPushButton()
@@ -492,6 +498,7 @@ class AITab(QWidget):
         form.addRow("", self.connection_status)
         form.addRow("Размышления", self.thinking)
         form.addRow("", self.thinking_status)
+        self.runtime_row = runtime_row
         form.addRow("Runtime", runtime_row)
         form.addRow(buttons)
         form.addRow(self.auth_info)
@@ -584,6 +591,19 @@ class AITab(QWidget):
         footer.addWidget(self.tools_btn)
         footer.addStretch(1)
         footer.addWidget(self.model)
+        self.context_answers = QSpinBox()
+        self.context_answers.setRange(0, 2_147_483_647)
+        self.context_answers.setValue(DEFAULT_CONTEXT_ANSWERS)
+        self.context_answers.setAccessibleName("Контекст, ответов")
+        self.context_answers.setToolTip("Число предыдущих ответов модели. 0 — вся переписка. Новый вопрос добавляется всегда.")
+        self.context_answers.setMaximumWidth(90)
+        self.context_answers.valueChanged.connect(self._change_context_answers)
+        self.context_answers_label = QLabel("Контекст")
+        self.context_answers_label.setBuddy(self.context_answers)
+        footer.addWidget(self.context_answers_label)
+        footer.addWidget(self.context_answers)
+        self.context_answers_label.hide()
+        self.context_answers.hide()
         footer.addWidget(self.connection_btn)
         footer.addWidget(self.stop_btn)
         footer.addWidget(self.send_btn)
@@ -626,11 +646,13 @@ class AITab(QWidget):
         self.workspace_path.setReadOnly(True)
         self.workspace_btn = QPushButton("Выбрать папку…")
         self.workspace_btn.clicked.connect(self._choose_folder)
-        workspace_row = QHBoxLayout()
+        self.workspace_settings = QWidget()
+        workspace_row = QHBoxLayout(self.workspace_settings)
+        workspace_row.setContentsMargins(0, 0, 0, 0)
         workspace_row.addWidget(QLabel("Рабочая папка"))
         workspace_row.addWidget(self.workspace_path, 1)
         workspace_row.addWidget(self.workspace_btn)
-        settings_content_layout.addLayout(workspace_row)
+        settings_content_layout.addWidget(self.workspace_settings)
         account_row = QHBoxLayout()
         account_row.addWidget(QLabel("Аккаунт"))
         account_row.addWidget(self.account, 1)
@@ -656,10 +678,12 @@ class AITab(QWidget):
         image_tool_hint.setWordWrap(True)
         image_tool_form.addRow(image_tool_hint)
         settings_content_layout.addWidget(self.image_tool_panel)
-        instruction_row = QFormLayout()
+        self.agent_instructions = QWidget()
+        instruction_row = QFormLayout(self.agent_instructions)
+        instruction_row.setContentsMargins(0, 0, 0, 0)
         instruction_row.addRow("Пояснения агента", self.response_style)
         instruction_row.addRow("Промпт", self.instructions_btn)
-        settings_content_layout.addLayout(instruction_row)
+        settings_content_layout.addWidget(self.agent_instructions)
         settings_content_layout.addStretch(1)
         settings_scroll.setWidget(settings_content)
         settings_layout.addWidget(settings_scroll)
@@ -710,6 +734,7 @@ class AITab(QWidget):
             self.status.show()
             self.send_btn.setEnabled(False)
             self.new_btn.setEnabled(False)
+            self.agent_btn.setEnabled(False)
             self.tools_btn.setEnabled(False)
             self.connection_panel.setEnabled(False)
             for widget in (self.account, self.account_add, self.account_rename, self.model, self.catalog_btn,
@@ -795,6 +820,8 @@ class AITab(QWidget):
         return panel
 
     def show_chat_tools(self, visible=True):
+        if self._is_plain_chat():
+            return
         if self.current:
             self.tools_panel.setVisible(visible)
 
@@ -929,7 +956,8 @@ class AITab(QWidget):
         self._sync_chat_tools()
 
     def _task_busy(self):
-        return self.rpc.busy or self.images.busy or bool(self._run().redirect)
+        run = self._run()
+        return run.rpc.busy or run.images.busy or bool(run.redirect) or bool(run.text_api and run.text_api.busy)
 
     def _select_free_images(self):
         if not self.store or self._task_busy() or self._pending or self._installing or self._logging_in:
@@ -1069,6 +1097,10 @@ class AITab(QWidget):
             self._fill_accounts()
 
     def _check_runtime(self):
+        if self._is_plain_chat():
+            self.install_panel.hide()
+            self.chat_install_btn.hide()
+            return ""
         issue = ""
         if self.provider.currentData() not in IMAGE_PROVIDERS:
             try:
@@ -1397,7 +1429,7 @@ class AITab(QWidget):
             return
         key = os.path.normcase(str(path))
         index = next((i for i, chat in enumerate(self.store.chats)
-                      if os.path.normcase(str(Path(chat["folder"]).resolve())) == key), -1)
+                      if chat.get("mode") != "text" and os.path.normcase(str(Path(chat["folder"]).resolve())) == key), -1)
         if index < 0:
             self._persist_connection()
             self.store.new_chat(str(path))
@@ -1405,12 +1437,44 @@ class AITab(QWidget):
             self._fill_chats()
         self._select_chat(index)
 
-    def _new_chat(self):
+    def _new_chat(self, mode="agent"):
         if self.store and not self._installing and not self._logging_in:
             self._persist_connection()
-            self.store.new_chat(self.work_dir)
+            self.store.new_chat(self.work_dir, mode)
             self._fill_chats()
             self._select_chat(0)
+
+    def _is_plain_chat(self):
+        return bool(self.current and self.current.get("mode") == "text")
+
+    def _context_answer_count(self):
+        count = self.current.get("context_answers")
+        return count if type(count) is int and 0 <= count <= self.context_answers.maximum() else DEFAULT_CONTEXT_ANSWERS
+
+    def _change_context_answers(self, count):
+        if self._is_plain_chat():
+            self.current["context_answers"] = count
+            self._save()
+            self._render_run(self._run(), scroll_to_end=False)
+
+    def _sync_chat_mode(self):
+        plain = self._is_plain_chat()
+        for widget in (self.context_label, self.access_label, self.folder_label, self.attach_btn, self.tools_btn):
+            widget.setVisible(not plain)
+        for widget in (self.context_answers_label, self.context_answers):
+            widget.setVisible(plain)
+        self.context_answers.blockSignals(True)
+        self.context_answers.setValue(self._context_answer_count() if plain else DEFAULT_CONTEXT_ANSWERS)
+        self.context_answers.blockSignals(False)
+        if plain:
+            self.tools_panel.hide()
+        for widget in (self.workspace_settings, self.agent_instructions):
+            widget.setVisible(not plain)
+        form = self.connection_panel.layout()
+        for item in (self.thinking, self.thinking_status, self.runtime_row):
+            form.setRowVisible(item, not plain)
+        self._provider_visibility()
+        self._check_runtime()
 
     def _select_chat(self, index):
         if (not self.store or not 0 <= index < len(self.store.chats) or self._installing
@@ -1435,6 +1499,7 @@ class AITab(QWidget):
         self.current["unread_result"] = False
         self._update_chat_item(self.current)
         self._restore_chat_selection()
+        self._sync_chat_mode()
         self.input.setPlainText(self._selected_run.draft)
         self._render_attachments()
         self.work_dir = str(Path(self.current["folder"]).resolve())
@@ -1456,7 +1521,7 @@ class AITab(QWidget):
         if not self.current.get("running"):
             self.timeline.finish("interrupted")
         self._render()
-        available = Path(self.work_dir).is_dir()
+        available = self._is_plain_chat() or Path(self.work_dir).is_dir()
         self._controls(self._task_busy() or bool(self._pending))
         self.output.set_activity(*self._run().activity)
         self.error_settings_btn.hide()
@@ -1511,6 +1576,9 @@ class AITab(QWidget):
         self._attach_files(paths)
 
     def _attach_image(self, picture):
+        if self._is_plain_chat():
+            self._attachment_error("Обычный чат принимает текст.")
+            return
         if not isinstance(picture, (QImage, QPixmap)) or picture.isNull() or picture.width() * picture.height() > 32_000_000:
             self._attachment_error("Картинка слишком большая или повреждена.")
             return
@@ -1521,6 +1589,9 @@ class AITab(QWidget):
             self._attach_data(bytes(data))
 
     def _attach_files(self, paths):
+        if self._is_plain_chat():
+            self._attachment_error("Обычный чат принимает текст.")
+            return
         for path in paths:
             try:
                 source = Path(path)
@@ -1531,7 +1602,7 @@ class AITab(QWidget):
                 self._attachment_error(str(exc))
 
     def _attach_data(self, data):
-        if not self.store or not self.current:
+        if not self.store or not self.current or self._is_plain_chat():
             return
         try:
             if self.provider.currentData() in IMAGE_PROVIDERS:
@@ -1676,6 +1747,7 @@ class AITab(QWidget):
 
     def _provider_visibility(self):
         provider = self.provider.currentData()
+        plain = self._is_plain_chat()
         account = provider in self._oauth_providers
         has_key = bool(self.key.text().strip()) or self.remember.isChecked()
         self.endpoint.setEnabled(provider in ("lanmessenger-api", "lanmessenger-images", "cloudflare-images"))
@@ -1685,18 +1757,24 @@ class AITab(QWidget):
         self.thinking.setEnabled(not image_mode)
         self.response_style.setEnabled(not image_mode)
         self.instructions_btn.setEnabled(not image_mode)
-        self.image_tool_panel.setVisible(not image_mode)
+        self.image_tool_panel.setVisible(not image_mode and not plain)
         self.access_label.setText("Картинки" if image_mode else "Полный доступ")
         self.access_label.setToolTip("Описание отправляется сервису генерации. Изображение сохраняется в истории ИИ." if image_mode else "Агент читает и меняет файлы и выполняет команды с правами текущего пользователя, в том числе за пределами рабочей папки.")
-        self.input.setPlaceholderText("Опишите картинку. Enter — создать, Shift+Enter — новая строка" if image_mode else "Задача для агента. Enter — отправить, Shift+Enter — новая строка")
+        if plain:
+            self.input.setPlaceholderText("Сообщение. Enter — отправить, Shift+Enter — новая строка")
+        elif image_mode:
+            self.input.setPlaceholderText("Опишите картинку. Enter — создать, Shift+Enter — новая строка")
+        else:
+            self.input.setPlaceholderText("Задача для агента. Enter — отправить, Shift+Enter — новая строка")
         self.key.setPlaceholderText("Необязательный ключ AI Horde; без ключа — анонимная очередь" if provider == "ai-horde" else "API-ключ; для входа по аккаунту оставьте пустым")
         self.key.setEnabled(bool(PROVIDERS[provider][1]))
         self.key_visibility.setEnabled(self.key.isEnabled())
-        self.login_btn.setVisible(account)
-        self.login_btn.setEnabled(account and not self._logging_in)
+        self.login_btn.setVisible(account and not plain)
+        self.login_btn.setEnabled(account and not plain and not self._logging_in)
         self.logout_btn.setText("Выйти из аккаунта" if account else "Отключить API-ключ")
+        self.logout_btn.setVisible(not plain or provider == "lanmessenger-api")
         self.logout_btn.setEnabled(not self._logging_in and (account or has_key))
-        self.key_disconnect_btn.setVisible(account and bool(PROVIDERS[provider][1]))
+        self.key_disconnect_btn.setVisible(account and not plain and bool(PROVIDERS[provider][1]))
         self.key_disconnect_btn.setEnabled(not self._logging_in and has_key)
 
     def _browse_runtime(self):
@@ -1748,6 +1826,9 @@ class AITab(QWidget):
             self._run().config = dict(self.store.config)
             self._run().key = self.key.text().strip()
             self._run().profile_id = self.store.active_profile
+            if self._is_plain_chat():
+                self._send_plain_text(text)
+                return
             self._run().sent_images = list(self._run().attachments)
             self._run().prompt_images = [image_content(path) for path in self._run().sent_images]
             image_connections = self._image_connections()
@@ -1771,6 +1852,59 @@ class AITab(QWidget):
                 self.error_settings_btn.setVisible(not supported())
             else:
                 self._error(str(exc))
+
+    def _send_plain_text(self, text):
+        run = self._run()
+        if run.config["provider"] != "lanmessenger-api":
+            raise ValueError("Для обычного чата выберите «Совместимый API» под шестерёнкой рядом с моделью.")
+        if not run.config["model"]:
+            raise ValueError("Выберите модель через шестерёнку или введите её ID в поле рядом.")
+        url = chat_endpoint(run.config["endpoint"])
+        context = context_messages(run.chat["messages"], self._context_answer_count())
+        messages = [{"role": message["role"], "content": message["text"]} for message in context]
+        messages.append({"role": "user", "content": text})
+        if run.text_api is None:
+            run.text_api = TextCompletion(self)
+            run.text_api.delta.connect(lambda delta: self._dispatch_run(run, self._plain_text_delta, delta))
+            run.text_api.completed.connect(lambda: self._dispatch_run(run, self._finish_plain_text, "completed"))
+            run.text_api.failed.connect(lambda error: self._dispatch_run(run, self._finish_plain_text, "failed", error))
+        run.text_reply = None
+        self._begin_task(text)
+        run.text_api.start(url, run.config["model"], run.key, messages)
+        self._controls(True)
+        self._set_activity("Ожидает ответа модели…", True)
+
+    def _plain_text_delta(self, text):
+        run = self._run()
+        if run.text_reply is None:
+            run.text_reply = {"id": str(uuid.uuid4()), "role": "assistant", "text": "", "status": "running"}
+            run.chat["messages"].append(run.text_reply)
+            self._set_activity("", False)
+        run.text_reply["text"] += text
+        if not self._render_timer.isActive() and self._visible_run():
+            self._render_timer.start(50)
+        if not self._save_timer.isActive():
+            self._save_timer.start(300)
+
+    def _finish_plain_text(self, outcome, error=""):
+        if self._closed:
+            return
+        self.timeline.finish(outcome)
+        self.current.update(running=False, interrupted=False, outcome=outcome)
+        if error:
+            guidance = self._error_guidance(error)
+            self.current["last_error"] = guidance
+            self.current["messages"].append({"role": "system", "text": guidance})
+            if self._visible_run():
+                self.status.setText(guidance)
+                self.status.show()
+                self.error_settings_btn.show()
+        self._mark_chat_result(self.current, outcome)
+        self._set_activity("", False)
+        self._update_chat_item(self.current)
+        self._controls(False)
+        self._save()
+        self._render()
 
     def _start_text_run(self, text):
         run = self._run()
@@ -2276,6 +2410,7 @@ class AITab(QWidget):
         if not self._visible_run():
             return
         active = active or self.images.busy or bool(self._run().redirect)
+        plain = self._is_plain_chat()
         for widget in (self.account, self.account_add, self.account_rename, self.model, self.settings_model,
                        self.catalog_btn, self.folder_label, self.project_btn, self.workspace_btn):
             widget.setEnabled(not active and not self._logging_in and not self._installing)
@@ -2283,11 +2418,15 @@ class AITab(QWidget):
         self.instructions_btn.setEnabled(self.response_style.isEnabled())
         show_followups = self.rpc.ready and (self.rpc.busy or bool(self._run().redirect)) and not self.images.busy
         can_followup = self._can_followup()
-        self.send_btn.setEnabled((not active or can_followup) and not self._logging_in and not self._installing and bool(self.current) and Path(self.work_dir).is_dir())
+        self.send_btn.setEnabled((not active or can_followup) and not self._logging_in and not self._installing and bool(self.current) and (plain or Path(self.work_dir).is_dir()))
         self.send_btn.setAccessibleName("В очередь" if show_followups else "Отправить сообщение")
         self.send_btn.setToolTip(self.queue_btn.toolTip() if show_followups else "Отправить сообщение")
-        self.input.setPlaceholderText("Новое сообщение. Enter — в очередь" if show_followups else
-                                      "Задача для агента. Enter — отправить, Shift+Enter — новая строка")
+        if plain:
+            self.input.setPlaceholderText("Сообщение. Enter — отправить, Shift+Enter — новая строка")
+        elif show_followups:
+            self.input.setPlaceholderText("Новое сообщение. Enter — в очередь")
+        elif self.provider.currentData() not in IMAGE_PROVIDERS:
+            self.input.setPlaceholderText("Задача для агента. Enter — отправить, Shift+Enter — новая строка")
         self.followup_actions.setVisible(show_followups)
         self.queue_btn.setEnabled(can_followup and self.send_btn.isEnabled())
         self.clarify_btn.setEnabled(can_followup and self.send_btn.isEnabled() and self._run().agent_active)
@@ -2297,6 +2436,8 @@ class AITab(QWidget):
         if not active:
             self.output.set_activity("", False)
         self.new_btn.setEnabled(not self._logging_in and not self._installing)
+        self.agent_btn.setEnabled(self.new_btn.isEnabled())
+        self.context_answers.setEnabled(not active and not self._logging_in and not self._installing)
         self.chat_list.setEnabled(not self._logging_in and not self._installing)
         self.connection_panel.setEnabled(not active and not self._installing)
         self.image_tool_panel.setEnabled(not active and not self._logging_in and not self._installing)
@@ -2379,6 +2520,12 @@ class AITab(QWidget):
         self._render()
 
     def _stop(self):
+        if self._is_plain_chat():
+            run = self._run()
+            if run.text_api and run.text_api.busy:
+                run.text_api.cancel()
+                self._finish_plain_text("stopped")
+            return
         self._stopped = True
         self._controls(self._task_busy() or bool(self._pending))
         self._cancel_agent_requests()
@@ -2473,6 +2620,10 @@ class AITab(QWidget):
         if key:
             text = text.replace(key, "<ключ скрыт>")
         lower = text.lower()
+        if self._is_plain_chat():
+            if any(token in lower for token in ("context_length", "context window", "too many tokens", "maximum context", "context overflow")):
+                return "История превышает лимит модели. Уменьшите число ответов в поле «Контекст» и повторите запрос."
+            return text
         if "шестерёнку" in lower or "рабочая папка" in lower or lower.startswith("внутренняя ошибка обработки задачи"):
             return text
         prefix = "Нажмите шестерёнку рядом с моделью → выберите нужный аккаунт. "
@@ -2728,6 +2879,8 @@ class AITab(QWidget):
                     chat = next((chat for chat in self.store.chats if chat["id"] == params["chat_id"]), None)
                     if chat is None:
                         raise ValueError("ИИ-чат не найден. Найдите его через list_chats.")
+                    if chat.get("mode") == "text":
+                        raise ValueError("Выберите чат в агентском режиме для передачи задачи.")
                     # An explicit idle chat_id is an allowed target selected by the user;
                     # newly created targets are always owned as direct children below.
                     existing = self._runs.get(chat["id"])
@@ -2952,6 +3105,16 @@ class AITab(QWidget):
         for message in chat["messages"]:
             if "id" not in message:
                 message["id"] = str(uuid.uuid4())
+        if chat.get("mode") == "text":
+            self.role_inspector.setText(f"Обычный чат · Модель: {model}")
+            sent = context_messages(chat["messages"], self._context_answer_count())
+            included = {message["id"] for message in sent}
+            first = sent[0]["id"] if sent else None
+            self.output.set_messages([
+                dict(message, text_chat=True, in_context=message["id"] in included,
+                     context_start=message["id"] == first) for message in chat["messages"]
+            ], scroll_to_end=scroll_to_end, text_chat=True)
+            return
         pending = [(request_id, text, "steering") for request_id, text in run.steering.items()]
         if run.redirect:
             pending.append((*run.redirect, "redirecting"))
@@ -2987,6 +3150,8 @@ class AITab(QWidget):
             for request_id, text, status in pending], scroll_to_end=scroll_to_end)
 
     def _start_auth(self):
+        if self._is_plain_chat():
+            raise ValueError("Для обычного чата выберите «Совместимый API» под шестерёнкой рядом с моделью.")
         if self._installing:
             raise ValueError('Дождитесь установки компонентов ИИ.')
         if self.auth.state() != QProcess.ProcessState.NotRunning:
@@ -3238,6 +3403,8 @@ class AITab(QWidget):
                 runs.append(self._make_run(chat))
         image_runs = [run for run in runs if run.images.busy or (run.chat and run.chat.get("image_job"))]
         for run in runs:
+            if run.text_api:
+                run.text_api.cancel()
             for child in run.agent_requests.values():
                 request, child.agent_parent_request = child.agent_parent_request, None
                 if request:

@@ -31,8 +31,9 @@ TOOL_NAMES = {"bash": "Команда", "read": "Чтение", "write": "Зап
 
 
 class MessageBody(QTextBrowser):
-    def __init__(self, folder, parent=None):
+    def __init__(self, folder, parent=None, allow_local_links=True):
         super().__init__(parent)
+        self.allow_local_links = allow_local_links
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
@@ -54,7 +55,8 @@ class MessageBody(QTextBrowser):
 
     def _open_link(self, url):
         resolved = self.document().baseUrl().resolved(url)
-        if resolved.scheme().lower() in ("http", "https", "file"):
+        scheme = resolved.scheme().lower()
+        if scheme in ("http", "https") or (scheme == "file" and self.allow_local_links):
             QDesktopServices.openUrl(resolved)
 
     def set_content(self, text, markdown=False):
@@ -193,7 +195,7 @@ class TranscriptRow(QFrame):
             if self.role == "user":
                 self.setStyleSheet(f"TranscriptRow {{ background: {colors['out']}; border-radius: 6px; }}")
         layout.addWidget(self.header)
-        self.body = MessageBody(folder, parent=self)
+        self.body = MessageBody(folder, parent=self, allow_local_links=not message.get("text_chat"))
         layout.addWidget(self.body)
         if self.role == "image_activity":
             open_source = QPushButton("Открыть чат генерации")
@@ -254,7 +256,20 @@ class TranscriptRow(QFrame):
             self.header.setText(f"Вы · {label}" if label else "Вы")
             self.header.setToolTip(tip)
         elif self.role == "assistant":
-            self.header.setText("Агент · Ответ прерван" if message.get("status") == "stopped" else "Агент")
+            name = "Модель" if message.get("text_chat") else "Агент"
+            interrupted = message.get("status") in ("stopped", "failed", "interrupted") if message.get("text_chat") else message.get("status") == "stopped"
+            self.header.setText(f"{name} · Ответ прерван" if interrupted else name)
+        if message.get("text_chat") and self.role in ("user", "assistant"):
+            in_context = message.get("in_context", False)
+            if self.property("inContext") != in_context:
+                self.setProperty("inContext", in_context)
+                colors = theme.bubbles()
+                border = colors["accent"] if in_context else "transparent"
+                background = colors["out"] if self.role == "user" else "transparent"
+                self.setStyleSheet(f"TranscriptRow {{ background: {background}; border: 1px solid {border}; border-radius: 6px; }}")
+            if message.get("context_start"):
+                self.header.setText(self.header.text() + " · Начало контекста")
+            self.header.setToolTip("Входит в контекст следующего запроса" if in_context else "")
         if self.expandable:
             status = message.get("status", "completed")
             if self.role == "thinking":
@@ -316,6 +331,11 @@ class AITranscript(QScrollArea):
         self.welcome = AIWelcome()
         self.welcome.expansion_changed.connect(self._expanding)
         self.layout.addWidget(self.welcome)
+        self.text_welcome = QLabel("Введите вопрос. Аккаунт и модель можно выбрать в настройках рядом с полем ввода.",
+                                   self.container)
+        self.text_welcome.setWordWrap(True)
+        self.text_welcome.setStyleSheet(f"color: {theme.bubbles()['ts']}; padding: 8px;")
+        self.text_welcome.hide()
         self.activity = QFrame()
         activity_layout = QHBoxLayout(self.activity)
         activity_layout.setContentsMargins(12, 6, 12, 6)
@@ -350,10 +370,16 @@ class AITranscript(QScrollArea):
         if self._follow_end:
             self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
-    def set_messages(self, messages, scroll_to_end=True):
+    def set_messages(self, messages, scroll_to_end=True, text_chat=False):
         welcome_visible = not any(m.get("role") in ("user", "agent_link") for m in messages)
-        returning_to_welcome = welcome_visible and self.welcome.isHidden()
-        self.welcome.setVisible(welcome_visible)
+        welcome = self.text_welcome if text_chat else self.welcome
+        previous = self.layout.itemAt(0).widget()
+        if previous is not welcome:
+            previous.hide()
+            self.layout.removeWidget(previous)
+            self.layout.insertWidget(0, welcome)
+        returning_to_welcome = welcome_visible and welcome.isHidden()
+        welcome.setVisible(welcome_visible)
         if welcome_visible:
             self._follow_end = False
             if returning_to_welcome:
